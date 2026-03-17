@@ -1,0 +1,19 @@
+[package]
+name = "symphony-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+symphony-core = { workspace = true }
+symphony-orchestrator = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

@@ -1,0 +1,21 @@
+chronoai-symphony
+Copyright (c) 2026 ChronoAI
+
+This project is an independent Rust implementation of the Symphony Service
+Specification. No source code was copied from the original project.
+
+ACKNOWLEDGMENTS
+================
+
+This project was built from the Symphony Service Specification (SPEC.md)
+created by OpenAI. The original specification and reference implementation
+are available at:
+
+    https://github.com/openai/symphony
+
+The original OpenAI Symphony project is licensed under the Apache License,
+Version 2.0. The specification document provided the design requirements
+for this independent implementation.
+
+The dashboard UI design was inspired by the OpenAI Symphony reference
+implementation's dashboard styling.

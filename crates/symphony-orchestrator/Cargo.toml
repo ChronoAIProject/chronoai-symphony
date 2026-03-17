@@ -1,0 +1,23 @@
+[package]
+name = "symphony-orchestrator"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+symphony-core = { workspace = true }
+symphony-workflow = { workspace = true }
+symphony-tracker = { workspace = true }
+symphony-workspace = { workspace = true }
+symphony-agent = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio-test = { workspace = true }

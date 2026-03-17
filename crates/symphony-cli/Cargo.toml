@@ -1,0 +1,24 @@
+[package]
+name = "symphony-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "symphony"
+path = "src/main.rs"
+
+[dependencies]
+symphony-core = { workspace = true }
+symphony-workflow = { workspace = true }
+symphony-tracker = { workspace = true }
+symphony-workspace = { workspace = true }
+symphony-agent = { workspace = true }
+symphony-orchestrator = { workspace = true }
+symphony-server = { workspace = true }
+symphony-logging = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }

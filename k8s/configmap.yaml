@@ -1,0 +1,50 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: symphony-workflow
+data:
+  WORKFLOW.md: |
+    ---
+    tracker:
+      kind: github
+      api_key: $GITHUB_TOKEN
+      project_slug: your-org/your-repo
+      active_states:
+        - Todo
+        - In Progress
+      terminal_states:
+        - Done
+        - Closed
+        - Cancelled
+
+    polling:
+      interval_ms: 30000
+
+    workspace:
+      root: $SYMPHONY_WORKSPACE_ROOT
+
+    agent:
+      max_concurrent_agents: 5
+      max_turns: 20
+
+    codex:
+      command: codex app-server
+      turn_timeout_ms: 3600000
+      stall_timeout_ms: 300000
+
+    server:
+      port: 8080
+    ---
+
+    You are a coding agent working on issue {{ issue.identifier }}: {{ issue.title }}.
+
+    ## Description
+
+    {{ issue.description }}
+
+    ## Instructions
+
+    1. Read the issue carefully.
+    2. Implement the required changes.
+    3. Write tests.
+    4. Create a pull request.

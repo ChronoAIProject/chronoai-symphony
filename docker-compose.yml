@@ -1,0 +1,24 @@
+services:
+  symphony:
+    build: .
+    container_name: symphony
+    restart: unless-stopped
+    ports:
+      - "${SYMPHONY_PORT:-8080}:8080"
+    environment:
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - SYMPHONY_WORKSPACE_ROOT=/data/workspaces
+      - RUST_LOG=${RUST_LOG:-info}
+    volumes:
+      - ./WORKFLOW.md:/home/symphony/WORKFLOW.md:ro
+      - workspaces:/data/workspaces
+    command: ["./WORKFLOW.md", "--port", "8080", "--pretty-logs"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/api/v1/state"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  workspaces:

@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: symphony
+  labels:
+    app: symphony
+spec:
+  replicas: 1  # Single instance - orchestrator owns in-memory state
+  strategy:
+    type: Recreate  # No rolling update - only one orchestrator at a time
+  selector:
+    matchLabels:
+      app: symphony
+  template:
+    metadata:
+      labels:
+        app: symphony
+    spec:
+      serviceAccountName: symphony
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: symphony
+          image: symphony:latest
+          args:
+            - /config/WORKFLOW.md
+            - --port
+            - "8080"
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: symphony-secrets
+                  key: github-token
+            - name: SYMPHONY_WORKSPACE_ROOT
+              value: /data/workspaces
+            - name: RUST_LOG
+              value: info
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: workspaces
+              mountPath: /data/workspaces
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+          livenessProbe:
+            httpGet:
+              path: /api/v1/state
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/v1/state
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: symphony-workflow
+        - name: workspaces
+          persistentVolumeClaim:
+            claimName: symphony-workspaces

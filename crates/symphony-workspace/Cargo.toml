@@ -1,0 +1,16 @@
+[package]
+name = "symphony-workspace"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+symphony-core = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+regex = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio-test = { workspace = true }
