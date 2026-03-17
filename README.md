@@ -15,7 +15,7 @@ Symphony is a long-running automation service that:
 ### Prerequisites
 
 - A GitHub repository with issues to process
-- A GitHub personal access token with `repo` scope
+- A GitHub personal access token (see [Token Permissions](#token-permissions) below)
 - A Codex-compatible coding agent installed (the `codex` CLI with `app-server` support)
 
 ### 1. Set environment variables
@@ -35,6 +35,8 @@ tracker:
   active_states:
     - Todo
     - In Progress
+    - Human Review
+    - Rework
   terminal_states:
     - Done
     - Closed
@@ -48,9 +50,13 @@ workspace:
 
 hooks:
   after_create: |
-    git clone https://github.com/your-org/your-repo.git .
+    git clone --depth 1 https://github.com/your-org/your-repo.git .
   before_run: |
-    git fetch origin && git checkout main && git pull
+    git fetch origin
+    git checkout main && git pull
+    BRANCH="symphony/issue-${SYMPHONY_ISSUE_NUMBER}"
+    git checkout -B "$BRANCH" origin/main
+  timeout_ms: 300000
 
 agent:
   max_concurrent_agents: 5
@@ -58,22 +64,51 @@ agent:
 
 codex:
   command: codex app-server
+  approval_policy: never
+  thread_sandbox: workspace-write
   turn_timeout_ms: 3600000
   stall_timeout_ms: 300000
+
+server:
+  port: 8080
 ---
 
 You are a coding agent working on issue {{ issue.identifier }}: {{ issue.title }}.
 
-## Description
-
 {{ issue.description }}
+
+{% if attempt %}
+Continuation attempt {{ attempt }}. Resume from current workspace state.
+{% endif %}
+
+## Status Map
+
+- **Todo** -> Move to `in-progress`, start work.
+- **In Progress** -> Continue implementation.
+- **Human Review** -> Do not code. Wait for review.
+- **Rework** -> Read PR review comments, address feedback, push fixes, return to `human-review`.
+- **Done** -> Shut down.
+
+## Git Workflow
+
+1. You are on branch `symphony/issue-{{ issue.identifier | remove: "#" }}`.
+2. Commit with conventional messages.
+3. Push and create a PR with `Closes {{ issue.identifier }}`.
+
+## PR Feedback Sweep (before moving to human-review)
+
+1. Read all PR comments: `gh pr view --comments`
+2. Read inline reviews: `gh api repos/{owner}/{repo}/pulls/{number}/comments`
+3. Address each comment: fix code or reply with justification.
+4. Re-run tests, push, repeat until no outstanding comments.
 
 ## Instructions
 
 1. Read the issue carefully.
-2. Implement the required changes.
-3. Write tests for your changes.
-4. Create a pull request.
+2. Implement changes and write tests.
+3. Push and create a pull request.
+4. Complete PR feedback sweep.
+5. Add label `human-review` to the issue.
 ```
 
 ### 3. Run Symphony
@@ -122,12 +157,15 @@ Symphony maps issue states using GitHub labels. Create these labels in your repo
 |-------|---------|---------------|
 | `todo` | Issue ready for agent to pick up | Active (dispatched) |
 | `in-progress` | Agent is working on it | Active (tracked) |
-| `human-review` | Agent finished, needs human review | Active (handoff) |
+| `human-review` | Agent finished, PR attached, needs human review | Active (handoff) |
+| `rework` | Reviewer requested changes on the PR | Active (agent addresses feedback) |
 | `done` | Work is complete | Terminal (workspace cleaned) |
 | `cancelled` | Issue abandoned | Terminal (workspace cleaned) |
 
 An open issue with **no workflow label** defaults to state `Todo`.
 A **closed** issue defaults to state `Done`.
+
+**Review lifecycle:** When the agent finishes, it adds `human-review`. A human reviews the PR. If changes are needed, the human swaps the label to `rework`. Symphony re-dispatches the agent, which reads PR review comments, addresses feedback, pushes fixes, and moves back to `human-review`. This cycle repeats until the human approves and adds `done`.
 
 ### Step 2: Write your WORKFLOW.md
 
@@ -159,9 +197,11 @@ tracker:
   api_key: $GITHUB_TOKEN               # Required. Supports $VAR env references.
   project_slug: owner/repo             # Required. GitHub owner/repo.
   endpoint: https://api.github.com     # Optional. Default shown.
-  active_states:                        # Optional. Default shown.
+  active_states:                        # Optional. Default: Todo, In Progress.
     - Todo
     - In Progress
+    - Human Review                       # Agent waits; re-dispatched on Rework.
+    - Rework                             # Agent reads PR feedback and fixes.
   terminal_states:                      # Optional. Default shown.
     - Done
     - Closed
@@ -177,14 +217,17 @@ workspace:
 
 hooks:
   after_create: |                       # Runs once when workspace is first created.
-    git clone https://github.com/owner/repo.git .
+    git clone --depth 1 https://github.com/owner/repo.git .
   before_run: |                         # Runs before each agent attempt.
-    git fetch origin && git checkout main && git pull
+    git fetch origin
+    git checkout main && git pull
+    BRANCH="symphony/issue-${SYMPHONY_ISSUE_NUMBER}"
+    git checkout -B "$BRANCH" origin/main
   after_run: |                          # Runs after each attempt (failures ignored).
     echo "done"
   before_remove: |                      # Runs before workspace deletion (failures ignored).
     echo "cleaning up"
-  timeout_ms: 60000                     # Hook timeout. Default: 60s.
+  timeout_ms: 300000                    # Hook timeout. Default: 60s.
 
 agent:
   max_concurrent_agents: 10            # Global concurrency limit. Default: 10.
@@ -196,7 +239,9 @@ agent:
 
 codex:
   command: codex app-server            # Agent launch command. Default shown.
-  approval_policy: auto-edit           # Passed to codex. Implementation-defined.
+  approval_policy: never               # Auto-approve all actions. Valid: untrusted,
+                                        # on-failure, on-request, granular, never.
+  thread_sandbox: workspace-write      # Sandbox mode. Default: workspace-write.
   turn_timeout_ms: 3600000             # Turn timeout. Default: 1 hour.
   read_timeout_ms: 5000                # Startup handshake timeout. Default: 5s.
   stall_timeout_ms: 300000             # Inactivity timeout. Default: 5 min. <=0 disables.
@@ -204,6 +249,16 @@ codex:
 server:
   port: 8080                            # Enable HTTP dashboard on this port.
 ```
+
+### Hook environment variables
+
+Hooks receive these environment variables for the current issue:
+
+| Variable | Example | Description |
+|----------|---------|-------------|
+| `SYMPHONY_ISSUE_ID` | `#68` | Issue ID |
+| `SYMPHONY_ISSUE_IDENTIFIER` | `#68` | Human-readable identifier |
+| `SYMPHONY_ISSUE_NUMBER` | `68` | Issue number (without `#`) |
 
 ### Step 3: Template variables
 
@@ -213,7 +268,7 @@ The prompt body uses [Liquid](https://shopify.github.io/liquid/) template syntax
 
 | Variable | Type | Description |
 |----------|------|-------------|
-| `issue.id` | string | GitHub node ID |
+| `issue.id` | string | Issue ID (`#123` format) |
 | `issue.identifier` | string | `#123` format |
 | `issue.title` | string | Issue title |
 | `issue.description` | string or nil | Issue body |
@@ -310,10 +365,11 @@ When started with `--port` or `server.port` in WORKFLOW.md:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/` | GET | HTML dashboard with auto-refresh |
-| `/api/v1/state` | GET | Full system state JSON |
+| `/` | GET | HTML dashboard with live updates, activity feed, approval queue |
+| `/api/v1/state` | GET | Full system state JSON (running, retrying, tokens, approvals) |
 | `/api/v1/{identifier}` | GET | Single issue runtime details |
 | `/api/v1/refresh` | POST | Trigger immediate poll cycle |
+| `/api/v1/approve/{id}` | POST | Approve or deny a pending agent request |
 
 **Example:**
 
@@ -326,6 +382,11 @@ curl http://localhost:8080/api/v1/%23123 | jq .
 
 # Force immediate poll
 curl -X POST http://localhost:8080/api/v1/refresh
+
+# Approve a pending request
+curl -X POST http://localhost:8080/api/v1/approve/abc123 \
+  -H 'Content-Type: application/json' \
+  -d '{"decision": "approve"}'
 ```
 
 ## Architecture
@@ -387,11 +448,22 @@ cargo build
 cargo test
 ```
 
+### Install
+
+```bash
+cargo install --path crates/symphony-cli
+```
+
 ### Run locally
 
 ```bash
 export GITHUB_TOKEN=ghp_...
+
+# From source
 cargo run -- ./WORKFLOW.md --port 8080 --pretty-logs
+
+# Or after install
+symphony ./WORKFLOW.md --port 8080 --pretty-logs
 ```
 
 ### CLI usage
@@ -412,12 +484,62 @@ Options:
 
 1. **Poll**: Every `polling.interval_ms`, Symphony fetches open GitHub issues matching `active_states` labels.
 2. **Dispatch**: Eligible issues are sorted by priority and age, then dispatched up to `max_concurrent_agents`.
-3. **Workspace**: Each issue gets an isolated directory under `workspace.root`, created on first dispatch and reused on retries.
-4. **Agent**: A Codex app-server subprocess is launched in the workspace. Symphony sends the rendered prompt and streams turn events.
-5. **Turns**: The agent can run up to `max_turns` consecutive turns per session. Between turns, Symphony checks if the issue is still active.
-6. **Retry**: On failure, exponential backoff retries are scheduled. On normal exit, a 1-second continuation retry re-checks issue state.
-7. **Reconciliation**: Every tick, running issues are checked against GitHub. Terminal issues trigger workspace cleanup. Non-active issues stop the agent.
-8. **Reload**: Changes to WORKFLOW.md are detected and applied without restart. Config, prompt, hooks, and concurrency limits update live.
+3. **Workspace**: Each issue gets an isolated directory under `workspace.root` with its own git clone, enabling parallel agents on different issues.
+4. **Branching**: The `before_run` hook creates a feature branch (`symphony/issue-N`) from `main` for each issue, so agents never conflict on the same branch.
+5. **Agent**: A Codex app-server subprocess is launched in the workspace. Symphony sends the rendered prompt (including the full issue description) and streams turn events in real-time.
+6. **Turns**: The agent can run up to `max_turns` consecutive turns per session. Between turns, Symphony checks if the issue is still active.
+7. **Dashboard**: The web UI shows running sessions with live activity feed, token usage, pending approvals with approve/deny buttons, and retry queue status.
+8. **Retry**: On failure, exponential backoff retries are scheduled. On normal exit, a 1-second continuation retry re-checks issue state.
+9. **Reconciliation**: Every tick, running issues are checked against GitHub. Terminal issues trigger workspace cleanup. Non-active issues stop the agent.
+10. **Reload**: Changes to WORKFLOW.md are detected and applied without restart. Config, prompt, hooks, and concurrency limits update live.
+
+## Token Permissions
+
+Symphony itself only **reads** issues for polling and reconciliation. However, the coding agent subprocess (Codex) inherits `GITHUB_TOKEN` and needs **write** access to push code, create PRs, update labels, and post comments.
+
+### Fine-grained personal access token (recommended)
+
+Go to **Settings > Developer settings > Personal access tokens > Fine-grained tokens**, select the target repository, and grant:
+
+| Permission | Access | Used by | Why |
+|------------|--------|---------|-----|
+| **Metadata** | Read | Symphony + Agent | Always required by GitHub |
+| **Issues** | Read & Write | Symphony (read), Agent (write) | Poll issues, update labels/state, post comments |
+| **Contents** | Read & Write | Agent | Clone repo, push branches, read/write files |
+| **Pull requests** | Read & Write | Agent | Create and update pull requests |
+| **Workflows** | Read & Write | Agent (optional) | Only if agent needs to modify GitHub Actions |
+
+### Classic personal access token
+
+If using a classic token, grant the `repo` scope (covers all of the above for private repos). For public repos, `public_repo` is sufficient.
+
+### Token setup
+
+```bash
+# Fine-grained token (recommended)
+export GITHUB_TOKEN=github_pat_...
+
+# Or classic token
+export GITHUB_TOKEN=ghp_...
+```
+
+### Who uses the token
+
+```
+GITHUB_TOKEN
+    |
+    +---> Symphony (read-only)
+    |       - Poll open/closed issues
+    |       - Fetch issue states for reconciliation
+    |       - Check labels for state mapping
+    |
+    +---> Coding Agent (read + write)
+            - git clone / git push (via hooks or agent tools)
+            - Create pull requests
+            - Add/remove labels (state transitions)
+            - Post comments on issues
+            - Update issue state
+```
 
 ## Security
 

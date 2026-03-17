@@ -1957,6 +1957,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "symphony-agent",
  "symphony-core",
  "symphony-orchestrator",
  "thiserror 2.0.18",

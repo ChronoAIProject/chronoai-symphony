@@ -8,22 +8,22 @@
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
+use serde_json::Value;
 use symphony_core::domain::{Issue, ServiceConfig};
 use symphony_core::error::SymphonyError;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
+use crate::approval_handler::ApprovalHandler;
 use crate::process::AgentProcess;
 use crate::protocol::events::AgentEvent;
 use crate::protocol::handshake::{perform_handshake, SessionInfo};
+use crate::protocol::messages::{
+    build_turn_start, default_approval_policy, default_thread_sandbox,
+    default_turn_sandbox_policy,
+};
 use crate::protocol::streaming::{stream_turn, TurnResult};
 use crate::timeout::TimeoutConfig;
-
-/// Default approval policy when none is configured.
-const DEFAULT_APPROVAL_POLICY: &str = "full-auto";
-
-/// Default sandbox setting.
-const DEFAULT_SANDBOX: &str = "none";
 
 /// A live agent session with an active subprocess and thread context.
 pub struct AgentSession {
@@ -35,35 +35,51 @@ pub struct AgentSession {
 /// Exit reason for a worker run.
 #[derive(Debug)]
 pub enum WorkerExitReason {
-    /// The run completed normally (all turns finished or issue resolved).
     Normal,
-    /// The run failed with an error.
     Failed(String),
 }
 
 /// Manages the agent lifecycle: process launch, handshake, and turn execution.
-///
-/// The runner does not own workspace or hook management directly; those
-/// responsibilities belong to the `WorkspaceManager`. The runner focuses
-/// on the agent subprocess and protocol interactions.
 pub struct AgentRunner {
     config: ServiceConfig,
 }
 
 impl AgentRunner {
-    /// Create a new agent runner with the given configuration.
     pub fn new(config: ServiceConfig) -> Self {
         Self { config }
     }
 
-    /// Return a reference to the current service configuration.
     pub fn config(&self) -> &ServiceConfig {
         &self.config
     }
 
+    /// Resolve the approval policy as a JSON Value.
+    /// Uses config override if present, otherwise uses OpenAI's default.
+    fn resolve_approval_policy(&self) -> Value {
+        match &self.config.codex_approval_policy {
+            Some(s) => {
+                // Try parsing as JSON first (could be a map like {"reject": {...}}).
+                serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.clone()))
+            }
+            None => default_approval_policy(),
+        }
+    }
+
+    fn resolve_thread_sandbox(&self) -> Value {
+        match &self.config.codex_thread_sandbox {
+            Some(s) => serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.clone())),
+            None => default_thread_sandbox(),
+        }
+    }
+
+    fn resolve_turn_sandbox_policy(&self, workspace_path: &str) -> Value {
+        match &self.config.codex_turn_sandbox_policy {
+            Some(s) => serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.clone())),
+            None => default_turn_sandbox_policy(workspace_path),
+        }
+    }
+
     /// Start a new agent session: launch process and perform handshake.
-    ///
-    /// The workspace directory must already exist before calling this.
     pub async fn start_session(
         &self,
         workspace_path: &Path,
@@ -72,26 +88,13 @@ impl AgentRunner {
         event_tx: &mpsc::Sender<AgentEvent>,
     ) -> Result<AgentSession, SymphonyError> {
         let command = &self.config.codex_command;
+        let cwd = workspace_path.to_string_lossy().to_string();
 
-        let approval_policy = self
-            .config
-            .codex_approval_policy
-            .as_deref()
-            .unwrap_or(DEFAULT_APPROVAL_POLICY);
+        let ap = self.resolve_approval_policy();
+        let sb = self.resolve_thread_sandbox();
+        let sp = self.resolve_turn_sandbox_policy(&cwd);
 
-        let sandbox = self
-            .config
-            .codex_thread_sandbox
-            .as_deref()
-            .unwrap_or(DEFAULT_SANDBOX);
-
-        let sandbox_policy = self
-            .config
-            .codex_turn_sandbox_policy
-            .as_deref()
-            .unwrap_or(DEFAULT_SANDBOX);
-
-        let cwd = workspace_path.to_string_lossy();
+        let title = format!("{}: {}", issue.identifier, issue.title);
 
         info!(
             issue_id = %issue.id,
@@ -120,10 +123,10 @@ impl AgentRunner {
             &mut process,
             &cwd,
             prompt,
-            &issue.title,
-            approval_policy,
-            sandbox,
-            sandbox_policy,
+            &title,
+            Some(&ap),
+            Some(&sb),
+            Some(&sp),
             timeout_config.read_timeout,
         )
         .await
@@ -174,32 +177,24 @@ impl AgentRunner {
         issue: &Issue,
         is_first_turn: bool,
         event_tx: &mpsc::Sender<AgentEvent>,
+        approval_handler: &dyn ApprovalHandler,
     ) -> Result<TurnResult, SymphonyError> {
         let timeout_config = self.build_timeout_config();
 
         if !is_first_turn {
-            let approval_policy = self
-                .config
-                .codex_approval_policy
-                .as_deref()
-                .unwrap_or(DEFAULT_APPROVAL_POLICY);
-
-            let sandbox_policy = self
-                .config
-                .codex_turn_sandbox_policy
-                .as_deref()
-                .unwrap_or(DEFAULT_SANDBOX);
-
             let cwd = session.workspace_path.to_string_lossy().to_string();
+            let ap = self.resolve_approval_policy();
+            let sp = self.resolve_turn_sandbox_policy(&cwd);
+            let title = format!("{}: {}", issue.identifier, issue.title);
 
-            let turn_req = crate::protocol::messages::build_turn_start(
+            let turn_req = build_turn_start(
                 session.process.pid().unwrap_or(0) as u64,
                 &session.session_info.thread_id,
                 prompt,
                 &cwd,
-                &issue.title,
-                approval_policy,
-                sandbox_policy,
+                &title,
+                &ap,
+                &sp,
             );
             let turn_json = serde_json::to_string(&turn_req)
                 .map_err(|e| SymphonyError::ResponseError {
@@ -212,6 +207,7 @@ impl AgentRunner {
             &mut session.process,
             event_tx,
             timeout_config.turn_timeout,
+            approval_handler,
         )
         .await
     }
@@ -228,21 +224,11 @@ impl AgentRunner {
         session.process.kill().await
     }
 
-    /// Build a `TimeoutConfig` from the service configuration.
     fn build_timeout_config(&self) -> TimeoutConfig {
         TimeoutConfig::new(
             self.config.codex_read_timeout_ms,
             self.config.codex_turn_timeout_ms,
             self.config.codex_stall_timeout_ms,
         )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn build_timeout_config_reads_flat_fields() {
-        // Verify the timeout builder reads from the flat config fields.
-        // Full integration tests require a running agent process.
     }
 }

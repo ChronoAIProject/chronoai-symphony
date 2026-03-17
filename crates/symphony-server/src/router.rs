@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use axum::routing::{get, post};
 use axum::Router;
+use symphony_orchestrator::approval_queue::PendingApprovalQueue;
 
 use crate::api;
 use crate::dashboard;
@@ -32,23 +33,31 @@ pub struct AppState {
     /// }
     /// ```
     pub snapshot_fn: Arc<dyn Fn() -> serde_json::Value + Send + Sync>,
+
+    /// Shared pending approval queue for human-in-the-loop decisions.
+    pub approval_queue: Arc<PendingApprovalQueue>,
 }
 
 /// Build the Axum router with all routes and shared state.
 ///
 /// # Routes
 ///
-/// | Method | Path                         | Handler                     |
-/// |--------|------------------------------|-----------------------------|
-/// | GET    | `/`                          | HTML dashboard              |
-/// | GET    | `/api/v1/state`              | Full orchestrator snapshot   |
-/// | GET    | `/api/v1/{issue_identifier}` | Single issue details        |
-/// | POST   | `/api/v1/refresh`            | Trigger poll+reconcile      |
+/// | Method | Path                              | Handler                     |
+/// |--------|-----------------------------------|-----------------------------|
+/// | GET    | `/`                               | HTML dashboard              |
+/// | GET    | `/api/v1/state`                   | Full orchestrator snapshot   |
+/// | GET    | `/api/v1/{issue_identifier}`       | Single issue details        |
+/// | POST   | `/api/v1/refresh`                 | Trigger poll+reconcile      |
+/// | POST   | `/api/v1/approve/{approval_id}`   | Resolve a pending approval  |
 pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(dashboard::handler::dashboard))
         .route("/api/v1/state", get(api::state::get_state))
         .route("/api/v1/refresh", post(api::refresh::post_refresh))
+        .route(
+            "/api/v1/approve/{approval_id}",
+            post(api::approve::post_approve),
+        )
         .route(
             "/api/v1/{issue_identifier}",
             get(api::issue::get_issue),
@@ -97,6 +106,9 @@ mod tests {
                     "rate_limits": null
                 })
             }),
+            approval_queue: Arc::new(
+                symphony_orchestrator::approval_queue::PendingApprovalQueue::new(),
+            ),
         })
     }
 

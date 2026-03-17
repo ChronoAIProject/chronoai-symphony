@@ -1,3 +1,5 @@
+pub mod activity_log;
+pub mod approval_queue;
 pub mod cleanup;
 pub mod concurrency;
 pub mod dispatch;

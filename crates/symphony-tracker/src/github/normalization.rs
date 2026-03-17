@@ -28,7 +28,9 @@ pub fn normalize_github_issue(
     terminal_states: &[String],
 ) -> Option<Issue> {
     let number = raw.get("number")?.as_u64()?;
-    let node_id = raw.get("node_id")?.as_str()?;
+    // node_id is required to confirm the payload is valid, but we use
+    // the issue number as our canonical id for REST API compatibility.
+    let _node_id = raw.get("node_id")?.as_str()?;
     let title = raw.get("title")?.as_str()?;
     let native_state = raw.get("state")?.as_str()?.to_lowercase();
 
@@ -76,9 +78,15 @@ pub fn normalize_github_issue(
         .and_then(|v| v.as_str())
         .and_then(|s| s.parse::<DateTime<Utc>>().ok());
 
+    // Use the issue number as `id` (prefixed with #) so that
+    // `fetch_issue_states_by_ids` can extract the number for API calls.
+    // The `node_id` is a GraphQL-only identifier that cannot be used with
+    // the REST API, so using it as `id` would break reconciliation.
+    let id = format!("#{number}");
+
     Some(Issue {
-        id: node_id.to_owned(),
-        identifier: format!("#{number}"),
+        id: id.clone(),
+        identifier: id,
         title: title.to_owned(),
         description,
         priority,
@@ -199,7 +207,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(issue.id, "MDU6SXNzdWU0Mg==");
+        assert_eq!(issue.id, "#42");
         assert_eq!(issue.identifier, "#42");
         assert_eq!(issue.title, "Fix the widget");
         assert_eq!(issue.state, "In Progress");

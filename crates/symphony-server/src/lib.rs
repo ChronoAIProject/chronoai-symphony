@@ -5,12 +5,13 @@
 //!
 //! # Endpoints
 //!
-//! | Method | Path                         | Description                 |
-//! |--------|------------------------------|-----------------------------|
-//! | GET    | `/`                          | HTML dashboard              |
-//! | GET    | `/api/v1/state`              | Full orchestrator snapshot   |
-//! | GET    | `/api/v1/{issue_identifier}` | Single issue details        |
-//! | POST   | `/api/v1/refresh`            | Trigger a poll+reconcile    |
+//! | Method | Path                              | Description                 |
+//! |--------|-----------------------------------|-----------------------------|
+//! | GET    | `/`                               | HTML dashboard              |
+//! | GET    | `/api/v1/state`                   | Full orchestrator snapshot   |
+//! | GET    | `/api/v1/{issue_identifier}`       | Single issue details        |
+//! | POST   | `/api/v1/refresh`                 | Trigger a poll+reconcile    |
+//! | POST   | `/api/v1/approve/{approval_id}`   | Resolve a pending approval  |
 
 pub mod api;
 pub mod dashboard;

@@ -7,7 +7,7 @@
 use symphony_core::identifiers::normalize_state;
 use symphony_tracker::traits::IssueTracker;
 use symphony_workspace::manager::WorkspaceManager;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Clean up workspaces for issues that are already in terminal states.
 ///
@@ -58,12 +58,12 @@ pub async fn startup_terminal_cleanup(
                     );
                 }
                 Err(e) => {
-                    // Best effort: workspace may not exist, which is fine.
-                    warn!(
+                    // Best effort: workspace may not exist on first run.
+                    debug!(
                         issue_id = %issue.id,
                         identifier = %issue.identifier,
                         error = %e,
-                        "failed to remove terminal workspace (may not exist)"
+                        "skipped terminal workspace cleanup (not found)"
                     );
                 }
             }

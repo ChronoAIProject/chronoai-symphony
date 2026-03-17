@@ -12,10 +12,12 @@ use symphony_agent::runner::AgentRunner;
 use symphony_core::domain::{Issue, ServiceConfig};
 use symphony_core::identifiers::normalize_state;
 use symphony_tracker::traits::IssueTracker;
+use symphony_workflow::template::render_prompt;
 use symphony_workspace::manager::WorkspaceManager;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
+use crate::approval_queue::{PendingApprovalQueue, QueuedApprovalHandler};
 use crate::events::WorkerExitReason;
 
 /// Default continuation prompt for subsequent turns.
@@ -50,8 +52,10 @@ pub async fn run_worker(
     tracker: Arc<dyn IssueTracker>,
     workspace_manager: Arc<WorkspaceManager>,
     event_tx: mpsc::Sender<(String, AgentEvent)>,
+    approval_queue: Arc<PendingApprovalQueue>,
 ) -> WorkerResult {
     let issue_id = issue.id.clone();
+    let identifier = issue.identifier.clone();
     let max_turns = config.agent_max_turns;
 
     info!(
@@ -75,8 +79,23 @@ pub async fn run_worker(
     };
     let workspace_path = workspace.path;
 
-    // Step 2: Run before_run hook.
-    if let Err(e) = workspace_manager.run_before_run_hook(&workspace_path).await {
+    // Step 2: Render prompt template with issue data.
+    let rendered_prompt = match render_prompt(&prompt_template, &issue, attempt) {
+        Ok(p) => {
+            info!(issue_id = %issue_id, prompt_len = p.len(), "prompt rendered");
+            p
+        }
+        Err(e) => {
+            error!(issue_id = %issue_id, error = %e, "failed to render prompt template");
+            return WorkerResult {
+                issue_id,
+                exit_reason: WorkerExitReason::Abnormal(format!("prompt render failed: {e}")),
+            };
+        }
+    };
+
+    // Step 3: Run before_run hook.
+    if let Err(e) = workspace_manager.run_before_run_hook(&workspace_path, Some(&issue_id), Some(&identifier)).await {
         error!(issue_id = %issue_id, error = %e, "before_run hook failed");
         return WorkerResult {
             issue_id,
@@ -98,19 +117,26 @@ pub async fn run_worker(
 
     // Step 3: Start agent session.
     let mut session = match agent_runner
-        .start_session(&workspace_path, &issue, &prompt_template, &local_tx)
+        .start_session(&workspace_path, &issue, &rendered_prompt, &local_tx)
         .await
     {
         Ok(session) => session,
         Err(e) => {
             error!(issue_id = %issue_id, error = %e, "failed to start session");
-            workspace_manager.run_after_run_hook(&workspace_path).await;
+            workspace_manager.run_after_run_hook(&workspace_path, Some(&issue_id), Some(&identifier)).await;
             return WorkerResult {
                 issue_id,
                 exit_reason: WorkerExitReason::Abnormal(format!("session start failed: {e}")),
             };
         }
     };
+
+    // Create a queued approval handler for this worker.
+    let approval_handler = QueuedApprovalHandler::new(
+        approval_queue,
+        issue_id.clone(),
+        issue.identifier.clone(),
+    );
 
     // Step 4: Turn loop.
     let mut turn_count = 0u32;
@@ -119,7 +145,7 @@ pub async fn run_worker(
     for turn_num in 0..max_turns {
         let is_first_turn = turn_num == 0;
         let prompt = if is_first_turn {
-            prompt_template.clone()
+            rendered_prompt.clone()
         } else {
             DEFAULT_CONTINUATION_PROMPT.to_string()
         };
@@ -132,7 +158,14 @@ pub async fn run_worker(
         );
 
         let turn_result = match agent_runner
-            .run_turn(&mut session, &prompt, &issue, is_first_turn, &local_tx)
+            .run_turn(
+                &mut session,
+                &prompt,
+                &issue,
+                is_first_turn,
+                &local_tx,
+                &approval_handler,
+            )
             .await
         {
             Ok(result) => result,
@@ -226,7 +259,7 @@ pub async fn run_worker(
     }
 
     // Step 6: Run after_run hook (best effort).
-    workspace_manager.run_after_run_hook(&workspace_path).await;
+    workspace_manager.run_after_run_hook(&workspace_path, Some(&issue_id), Some(&identifier)).await;
 
     info!(
         issue_id = %issue_id,

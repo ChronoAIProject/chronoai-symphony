@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use symphony_core::error::SymphonyError;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tracing::{debug, error, info, warn};
 
@@ -26,13 +26,17 @@ impl AgentProcess {
     pub async fn launch(command: &str, cwd: &Path) -> Result<Self, SymphonyError> {
         info!(command, cwd = %cwd.display(), "launching agent process");
 
+        // Merge stderr into stdout. The OpenAI reference uses Erlang's
+        // `:stderr_to_stdout` Port option which does OS-level fd dup.
+        // We achieve the same with `2>&1` shell redirection.
+        let merged_command = format!("{command} 2>&1");
         let mut child = Command::new("bash")
             .arg("-lc")
-            .arg(command)
+            .arg(&merged_command)
             .current_dir(cwd)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|e| SymphonyError::CodexNotFound {
                 command: format!("{command}: {e}"),
@@ -51,19 +55,6 @@ impl AgentProcess {
             .ok_or_else(|| SymphonyError::ResponseError {
                 detail: "failed to capture agent stdin".to_string(),
             })?;
-
-        let stderr = child.stderr.take();
-
-        // Spawn a background task to drain and log stderr.
-        if let Some(stderr) = stderr {
-            tokio::spawn(async move {
-                let reader = BufReader::new(stderr);
-                let mut lines = reader.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    warn!(target: "agent_stderr", "{}", line);
-                }
-            });
-        }
 
         let pid = child.id();
         info!(pid = ?pid, "agent process launched");
@@ -114,17 +105,31 @@ impl AgentProcess {
             })?;
 
         if bytes_read == 0 {
-            debug!("agent stdout closed (EOF)");
+            info!("agent stdout closed (EOF)");
             return Ok(None);
         }
 
         // Trim the trailing newline.
         let trimmed = line.trim_end().to_string();
         if !trimmed.is_empty() {
-            debug!(line_len = trimmed.len(), "read line from agent");
+            let preview: String = trimmed.chars().take(200).collect();
+            info!(
+                bytes = bytes_read,
+                line_len = trimmed.len(),
+                preview = %preview,
+                "read line from agent"
+            );
         }
 
         Ok(Some(trimmed))
+    }
+
+    /// Read raw bytes from stdout (for debugging).
+    /// Returns the number of bytes read, or 0 on EOF.
+    pub async fn read_raw(&mut self, buf: &mut [u8]) -> Result<usize, SymphonyError> {
+        self.stdout.read(buf).await.map_err(|e| SymphonyError::ResponseError {
+            detail: format!("failed to read raw bytes: {e}"),
+        })
     }
 
     /// Kill the agent process.

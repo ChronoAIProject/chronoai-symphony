@@ -115,6 +115,8 @@ impl WorkspaceManager {
                     script,
                     &path,
                     self.hook_timeout_ms,
+                    Some(identifier),
+                    Some(identifier),
                 )
                 .await
                 {
@@ -139,9 +141,12 @@ impl WorkspaceManager {
     /// Run the `before_run` hook if configured.
     ///
     /// Call this before starting an agent session in the workspace.
+    /// Issue context is passed as environment variables to the hook script.
     pub async fn run_before_run_hook(
         &self,
         workspace_path: &Path,
+        issue_id: Option<&str>,
+        issue_identifier: Option<&str>,
     ) -> Result<(), SymphonyError> {
         if let Some(ref script) = self.before_run_hook {
             run_hook(
@@ -149,6 +154,8 @@ impl WorkspaceManager {
                 script,
                 workspace_path,
                 self.hook_timeout_ms,
+                issue_id,
+                issue_identifier,
             )
             .await?;
         }
@@ -159,13 +166,15 @@ impl WorkspaceManager {
     ///
     /// Call this after an agent session completes. Failures are logged but
     /// not propagated.
-    pub async fn run_after_run_hook(&self, workspace_path: &Path) {
+    pub async fn run_after_run_hook(&self, workspace_path: &Path, issue_id: Option<&str>, issue_identifier: Option<&str>) {
         if let Some(ref script) = self.after_run_hook {
             if let Err(e) = run_hook(
                 "after_run",
                 script,
                 workspace_path,
                 self.hook_timeout_ms,
+                issue_id,
+                issue_identifier,
             )
             .await
             {
@@ -195,6 +204,8 @@ impl WorkspaceManager {
                 script,
                 &path,
                 self.hook_timeout_ms,
+                Some(identifier),
+                Some(identifier),
             )
             .await
             {

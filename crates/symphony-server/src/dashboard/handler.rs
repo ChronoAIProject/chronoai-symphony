@@ -25,7 +25,7 @@ fn render_shell(initial: &Value) -> String {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Symphony Dashboard</title>
+<title>Chrono AI Symphony</title>
 <style>{CSS}</style>
 </head>
 <body>
@@ -162,6 +162,35 @@ a:hover{color:var(--accent)}
 }
 .refresh-btn:hover{transform:translateY(-1px);box-shadow:0 12px 24px rgba(16,163,127,0.22)}
 
+.approve-btn{
+  appearance:none;border:1px solid var(--accent);background:var(--accent);color:white;
+  border-radius:999px;padding:0.34rem 0.72rem;cursor:pointer;font:inherit;
+  font-size:0.82rem;font-weight:600;margin-right:0.4rem;transition:opacity 140ms;
+}
+.approve-btn:hover{opacity:0.9}
+.deny-btn{
+  appearance:none;border:1px solid var(--danger);background:var(--danger);color:white;
+  border-radius:999px;padding:0.34rem 0.72rem;cursor:pointer;font:inherit;
+  font-size:0.82rem;font-weight:600;transition:opacity 140ms;
+}
+.deny-btn:hover{opacity:0.9}
+.activity-toggle{
+  appearance:none;border:1px solid var(--line-strong);background:transparent;color:var(--muted);
+  border-radius:999px;padding:0.2rem 0.6rem;cursor:pointer;font:inherit;
+  font-size:0.78rem;font-weight:600;margin-top:0.3rem;transition:background 140ms,color 140ms;
+}
+.activity-toggle:hover{background:var(--card-muted);color:var(--ink)}
+.activity-panel{
+  margin-top:0.5rem;padding:0.75rem;border-radius:12px;background:#f5f5f7;
+  border:1px solid var(--line);font-family:"Sohne Mono","SFMono-Regular","SF Mono",Consolas,monospace;
+  font-size:0.82rem;max-height:300px;overflow-y:auto;white-space:pre-wrap;color:#353740;
+}
+.pending-badge{
+  display:inline-flex;align-items:center;gap:0.35rem;padding:0.25rem 0.6rem;
+  border-radius:999px;background:#fff3cd;border:1px solid #ffc107;color:#856404;
+  font-size:0.78rem;font-weight:700;animation:pulse 2s ease-in-out infinite;
+}
+
 @media(max-width:860px){
   .app-shell{padding:1rem 0.85rem 2rem}
   .hero-grid{grid-template-columns:1fr}
@@ -191,6 +220,14 @@ function timeSince(iso,now){
   let d=new Date(iso);
   return Math.max(0,(now-d)/1000);
 }
+function fmtTime(iso){
+  if(!iso)return"";
+  let d=new Date(iso);
+  let h=String(d.getHours()).padStart(2,"0");
+  let m=String(d.getMinutes()).padStart(2,"0");
+  let s=String(d.getSeconds()).padStart(2,"0");
+  return h+":"+m+":"+s;
+}
 function stateBadge(st){
   if(!st)return"state-badge";
   let s=st.toLowerCase();
@@ -201,6 +238,26 @@ function stateBadge(st){
 }
 function esc(s){if(!s)return"";let d=document.createElement("div");d.textContent=s;return d.innerHTML;}
 
+let expandedActivities={};
+let activityScrollPos={};
+function toggleActivity(issueId){
+  expandedActivities[issueId]=!expandedActivities[issueId];
+  if(expandedActivities[issueId]){activityScrollPos[issueId]=-1;}// -1 = scroll to bottom
+  render(state);
+}
+
+async function approveAction(id,decision){
+  try{
+    await fetch("/api/v1/approve/"+encodeURIComponent(id),{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({decision:decision})
+    });
+    let r=await fetch("/api/v1/state");
+    if(r.ok){state=await r.json();render(state);}
+  }catch(e){}
+}
+
 function render(data){
   let now=Date.now();
   let c=data.counts||{};
@@ -208,6 +265,7 @@ function render(data){
   let ret=data.retrying||[];
   let tot=data.codex_totals||{};
   let rl=data.rate_limits;
+  let approvals=data.pending_approvals||[];
 
   let activeSeconds=(tot.seconds_running||0);
   run.forEach(function(e){activeSeconds+=timeSince(e.started_at,now);});
@@ -216,7 +274,7 @@ function render(data){
   <header class="hero-card">
     <div class="hero-grid">
       <div>
-        <p class="eyebrow">Symphony Observability</p>
+        <p class="eyebrow">Chrono AI Symphony Observability</p>
         <h1 class="hero-title">Operations Dashboard</h1>
         <p class="hero-copy">Current state, retry pressure, token usage, and orchestration health for the active runtime.</p>
       </div>
@@ -293,9 +351,16 @@ function render(data){
       if(e.tokens){tIn=e.tokens.input_tokens||tIn;tOut=e.tokens.output_tokens||tOut;tTot=e.tokens.total_tokens||tTot;}
       let st=e.state||(e.issue&&e.issue.state)||"";
       let id=esc(e.issue_identifier||e.identifier||"");
+      let issueKey=e.issue_id||id;
+      let activityLog=e.activity||e.activity_log||[];
+      let hasActivity=activityLog.length>0;
       html+=`<tr>
         <td><div class="issue-stack"><span class="issue-id">${id}</span>
-          <a class="issue-link" href="/api/v1/${encodeURIComponent(id)}">JSON details</a></div></td>
+          <a class="issue-link" href="/api/v1/${encodeURIComponent(id)}">JSON details</a>`;
+      if(hasActivity){
+        html+=`<button class="activity-toggle" onclick="toggleActivity('${esc(issueKey)}')">${expandedActivities[issueKey]?"Hide activity":"Activity ("+activityLog.length+")"}</button>`;
+      }
+      html+=`</div></td>
         <td><span class="${stateBadge(st)}">${esc(st)}</span></td>
         <td>${e.session_id?`<button class="copy-btn" onclick="navigator.clipboard.writeText('${esc(e.session_id)}');this.textContent='Copied';setTimeout(()=>this.textContent='Copy ID',1200)">Copy ID</button>`:`<span class="muted">n/a</span>`}</td>
         <td>${rtLabel}</td>
@@ -304,6 +369,47 @@ function render(data){
         <td><div class="token-stack">
           <span>Total: ${fmt(tTot)}</span>
           <span class="muted">In ${fmt(tIn)} / Out ${fmt(tOut)}</span></div></td>
+      </tr>`;
+      if(hasActivity&&expandedActivities[issueKey]){
+        let logLines=activityLog.map(function(a){
+          let ts=fmtTime(a.timestamp||a.ts||"");
+          let evType=esc(a.event_type||a.type||"event");
+          let msg=esc(a.message||a.msg||"");
+          return"["+ts+"] "+evType+": "+msg;
+        }).join("\n");
+        html+=`<tr><td colspan="6"><div class="activity-panel" id="activity-${esc(issueKey)}">${logLines}</div></td></tr>`;
+      }
+    });
+    html+=`</tbody></table></div>`;
+  }
+  html+=`</section>
+
+  <section class="section-card">
+    <div class="section-header">
+      <div>
+        <h2 class="section-title">Pending approvals</h2>
+        <p class="section-copy">Agent requests waiting for operator decision.</p>
+      </div>
+    </div>`;
+
+  if(approvals.length===0){
+    html+=`<p class="empty-state">No pending approvals.</p>`;
+  }else{
+    html+=`<div class="table-wrap"><table class="data-table" style="min-width:700px">
+    <thead><tr><th>Issue</th><th>Method</th><th>Requested at</th><th>Actions</th></tr></thead><tbody>`;
+    approvals.forEach(function(a){
+      let aId=esc(a.id||a.approval_id||"");
+      let issue=esc(a.issue_identifier||a.issue_id||"");
+      let method=esc(a.method||"n/a");
+      let reqAt=esc(a.requested_at||a.created_at||"n/a");
+      html+=`<tr>
+        <td><div class="issue-stack"><span class="issue-id">${issue}</span></div></td>
+        <td><span class="pending-badge">${method}</span></td>
+        <td style="font-family:monospace">${reqAt}</td>
+        <td>
+          <button class="approve-btn" onclick="approveAction('${aId}','approve')">Approve</button>
+          <button class="deny-btn" onclick="approveAction('${aId}','deny')">Deny</button>
+        </td>
       </tr>`;
     });
     html+=`</tbody></table></div>`;
@@ -337,7 +443,26 @@ function render(data){
   }
   html+=`</section>`;
 
+  // Save scroll positions of open activity panels before replacing DOM.
+  document.querySelectorAll(".activity-panel").forEach(function(el){
+    let key=el.id.replace("activity-","");
+    if(key)activityScrollPos[key]=el.scrollTop;
+  });
+
   document.getElementById("dashboard").innerHTML=html;
+
+  // Restore scroll positions after DOM update.
+  Object.keys(activityScrollPos).forEach(function(key){
+    let el=document.getElementById("activity-"+key);
+    if(el){
+      if(activityScrollPos[key]===-1){
+        el.scrollTop=el.scrollHeight;
+        activityScrollPos[key]=el.scrollTop;
+      }else{
+        el.scrollTop=activityScrollPos[key];
+      }
+    }
+  });
 }
 
 let pollTimer=null;
@@ -371,6 +496,7 @@ mod tests {
             "counts": { "running": 0, "retrying": 0 },
             "running": [],
             "retrying": [],
+            "pending_approvals": [],
             "codex_totals": {
                 "input_tokens": 0, "output_tokens": 0,
                 "total_tokens": 0, "seconds_running": 0.0
@@ -379,9 +505,11 @@ mod tests {
         });
         let html = render_shell(&snapshot);
         assert!(html.contains("Operations Dashboard"));
-        assert!(html.contains("symphony-observability") || html.contains("Symphony Observability"));
+        assert!(html.contains("Chrono AI Symphony Observability"));
         assert!(html.contains("/api/v1/state"));
         assert!(html.contains("status-badge-live"));
+        assert!(html.contains("Pending approvals"));
+        assert!(html.contains("approveAction"));
     }
 
     #[test]

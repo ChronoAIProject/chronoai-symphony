@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 symphony-core = { workspace = true }
+symphony-agent = { workspace = true }
 symphony-orchestrator = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }

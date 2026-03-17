@@ -47,6 +47,13 @@ pub enum AgentEvent {
         timestamp: DateTime<Utc>,
     },
 
+    /// An approval request was received from the agent process.
+    ApprovalRequested {
+        approval_id: String,
+        method: String,
+        timestamp: DateTime<Utc>,
+    },
+
     /// An approval request was auto-approved by the agent runner.
     ApprovalAutoApproved {
         timestamp: DateTime<Utc>,

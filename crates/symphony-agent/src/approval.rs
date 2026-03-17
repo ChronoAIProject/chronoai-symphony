@@ -1,59 +1,82 @@
-//! Approval and tool-call policy for agent sessions.
+//! Approval and tool-call policy for the Codex app-server protocol.
 //!
-//! Determines whether incoming approval requests should be auto-approved
-//! and detects when the agent requires user input to continue.
+//! Based on the OpenAI Symphony reference implementation's handling of
+//! approval requests, tool calls, and user input signals.
 
 use serde_json::Value;
 
-/// Methods that should be auto-approved without user interaction.
-const AUTO_APPROVE_METHODS: &[&str] = &[
-    "codex/approveExecution",
-    "codex/approveFileChange",
-    "codex/approveCommand",
-    "codex/approveTool",
+/// Approval request methods that should be auto-approved.
+const APPROVAL_METHODS: &[&str] = &[
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
+    "execCommandApproval",
+    "applyPatchApproval",
 ];
 
 /// Methods that indicate user input is required.
-const USER_INPUT_METHODS: &[&str] = &[
-    "codex/requestInput",
-    "codex/requestUserInput",
-    "codex/userInputRequired",
+const INPUT_REQUIRED_METHODS: &[&str] = &[
+    "item/tool/requestUserInput",
+    "turn/input_required",
+    "turn/needs_input",
+    "turn/need_input",
+    "turn/request_input",
+    "turn/request_response",
+    "turn/provide_input",
+    "turn/approval_required",
 ];
 
-/// Determine whether an approval request with the given method should
-/// be auto-approved.
-///
-/// Returns `true` for command execution and file-change approval requests
-/// that are safe to approve in fully automated mode.
-pub fn should_auto_approve(method: &str) -> bool {
-    AUTO_APPROVE_METHODS
-        .iter()
-        .any(|m| method.eq_ignore_ascii_case(m))
+/// Check if the given method is an approval request that should be
+/// auto-approved in a non-interactive session.
+pub fn is_approval_request(method: &str) -> bool {
+    APPROVAL_METHODS.iter().any(|m| *m == method)
 }
 
-/// Detect whether a message indicates that user input is required.
-///
-/// Checks both the method name and common patterns in the params payload
-/// that signal the agent cannot continue without human interaction.
+/// Check if the given method is a tool call request (`item/tool/call`).
+pub fn is_tool_call(method: &str) -> bool {
+    method == "item/tool/call"
+}
+
+/// Check if the given method is a user-input-required signal.
 pub fn is_user_input_request(method: &str, params: &Value) -> bool {
-    // Direct method match.
-    if USER_INPUT_METHODS
-        .iter()
-        .any(|m| method.eq_ignore_ascii_case(m))
-    {
+    if INPUT_REQUIRED_METHODS.iter().any(|m| *m == method) {
         return true;
     }
 
-    // Check for input_required flag in params.
-    if let Some(true) = params.get("inputRequired").and_then(|v| v.as_bool()) {
-        return true;
-    }
-
-    if let Some(true) = params.get("input_required").and_then(|v| v.as_bool()) {
-        return true;
+    // Check for turn/* methods with input-required flags in the payload.
+    if method.starts_with("turn/") {
+        if has_input_required_flag(params) {
+            return true;
+        }
+        if let Some(inner) = params.get("params") {
+            if has_input_required_flag(inner) {
+                return true;
+            }
+        }
     }
 
     false
+}
+
+/// Return the approval decision string for the given method.
+///
+/// Uses `"acceptForSession"` for `item/*` methods and `"approved_for_session"`
+/// for legacy methods, matching the OpenAI reference implementation.
+pub fn approval_decision(method: &str) -> &'static str {
+    match method {
+        "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
+            "acceptForSession"
+        }
+        _ => "approved_for_session",
+    }
+}
+
+fn has_input_required_flag(value: &Value) -> bool {
+    value.get("requiresInput") == Some(&Value::Bool(true))
+        || value.get("needsInput") == Some(&Value::Bool(true))
+        || value.get("input_required") == Some(&Value::Bool(true))
+        || value.get("inputRequired") == Some(&Value::Bool(true))
+        || value.get("type").and_then(|v| v.as_str()) == Some("input_required")
+        || value.get("type").and_then(|v| v.as_str()) == Some("needs_input")
 }
 
 #[cfg(test)]
@@ -62,66 +85,67 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn auto_approves_execution() {
-        assert!(should_auto_approve("codex/approveExecution"));
+    fn approval_command_execution() {
+        assert!(is_approval_request("item/commandExecution/requestApproval"));
     }
 
     #[test]
-    fn auto_approves_file_change() {
-        assert!(should_auto_approve("codex/approveFileChange"));
+    fn approval_file_change() {
+        assert!(is_approval_request("item/fileChange/requestApproval"));
     }
 
     #[test]
-    fn auto_approves_command() {
-        assert!(should_auto_approve("codex/approveCommand"));
+    fn approval_legacy_exec() {
+        assert!(is_approval_request("execCommandApproval"));
     }
 
     #[test]
-    fn auto_approves_tool() {
-        assert!(should_auto_approve("codex/approveTool"));
+    fn approval_legacy_patch() {
+        assert!(is_approval_request("applyPatchApproval"));
     }
 
     #[test]
-    fn does_not_auto_approve_unknown() {
-        assert!(!should_auto_approve("codex/unknownMethod"));
+    fn not_approval() {
+        assert!(!is_approval_request("turn/completed"));
+        assert!(!is_approval_request("notification"));
     }
 
     #[test]
-    fn case_insensitive_auto_approve() {
-        assert!(should_auto_approve("CODEX/APPROVEEXECUTION"));
+    fn tool_call_method() {
+        assert!(is_tool_call("item/tool/call"));
+        assert!(!is_tool_call("item/tool/requestUserInput"));
     }
 
     #[test]
-    fn detects_user_input_by_method() {
-        assert!(is_user_input_request("codex/requestInput", &json!({})));
+    fn input_required_direct_method() {
+        assert!(is_user_input_request("item/tool/requestUserInput", &json!({})));
+        assert!(is_user_input_request("turn/input_required", &json!({})));
+        assert!(is_user_input_request("turn/needs_input", &json!({})));
     }
 
     #[test]
-    fn detects_user_input_by_params_flag() {
-        assert!(is_user_input_request(
-            "someMethod",
-            &json!({"inputRequired": true})
-        ));
+    fn input_required_via_flag() {
+        assert!(is_user_input_request("turn/something", &json!({"requiresInput": true})));
+        assert!(is_user_input_request("turn/something", &json!({"needsInput": true})));
+        assert!(is_user_input_request("turn/something", &json!({"inputRequired": true})));
+        assert!(is_user_input_request("turn/x", &json!({"type": "input_required"})));
     }
 
     #[test]
-    fn detects_user_input_by_snake_case_flag() {
-        assert!(is_user_input_request(
-            "someMethod",
-            &json!({"input_required": true})
-        ));
+    fn input_not_required() {
+        assert!(!is_user_input_request("turn/completed", &json!({})));
+        assert!(!is_user_input_request("notification", &json!({"requiresInput": true})));
     }
 
     #[test]
-    fn not_user_input_for_normal_methods() {
-        assert!(!is_user_input_request("codex/turnCompleted", &json!({})));
+    fn decision_for_item_methods() {
+        assert_eq!(approval_decision("item/commandExecution/requestApproval"), "acceptForSession");
+        assert_eq!(approval_decision("item/fileChange/requestApproval"), "acceptForSession");
     }
 
     #[test]
-    fn not_user_input_when_flag_is_false() {
-        assert!(!is_user_input_request(
-            "someMethod",
-            &json!({"inputRequired": false})
-        ));
+    fn decision_for_legacy_methods() {
+        assert_eq!(approval_decision("execCommandApproval"), "approved_for_session");
+        assert_eq!(approval_decision("applyPatchApproval"), "approved_for_session");
     }
 }

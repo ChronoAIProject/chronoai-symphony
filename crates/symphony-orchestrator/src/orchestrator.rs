@@ -5,7 +5,7 @@
 //! managing retries, and responding to configuration changes.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -20,6 +20,8 @@ use symphony_workspace::manager::WorkspaceManager;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
+use crate::activity_log::{ActivityEntry, ActivityLog};
+use crate::approval_queue::PendingApprovalQueue;
 use crate::cleanup::startup_terminal_cleanup;
 use crate::dispatch::{is_dispatch_eligible, sort_for_dispatch};
 use crate::events::{OrchestratorEvent, WorkerExitReason};
@@ -49,6 +51,11 @@ pub struct RunningIssueSummary {
     pub started_at: String,
 }
 
+/// Thread-safe handle for reading the latest orchestrator snapshot.
+///
+/// Shared with the HTTP server so the dashboard can display live state.
+pub type SharedSnapshot = Arc<RwLock<serde_json::Value>>;
+
 /// The main orchestrator that coordinates all agent activity.
 pub struct Orchestrator {
     state: OrchestratorState,
@@ -59,6 +66,9 @@ pub struct Orchestrator {
     agent_runner: Arc<AgentRunner>,
     event_rx: mpsc::Receiver<OrchestratorEvent>,
     event_tx: mpsc::Sender<OrchestratorEvent>,
+    shared_snapshot: SharedSnapshot,
+    approval_queue: Arc<PendingApprovalQueue>,
+    activity_log: Arc<ActivityLog>,
 }
 
 impl Orchestrator {
@@ -82,6 +92,17 @@ impl Orchestrator {
         };
 
         let (event_tx, event_rx) = mpsc::channel(256);
+        let shared_snapshot = Arc::new(RwLock::new(serde_json::json!({
+            "generated_at": Utc::now().to_rfc3339(),
+            "counts": { "running": 0, "retrying": 0 },
+            "running": [],
+            "retrying": [],
+            "codex_totals": { "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "seconds_running": 0.0 },
+            "rate_limits": null
+        })));
+
+        let approval_queue = Arc::new(PendingApprovalQueue::new());
+        let activity_log = Arc::new(ActivityLog::new(200));
 
         Self {
             state,
@@ -92,12 +113,30 @@ impl Orchestrator {
             agent_runner,
             event_rx,
             event_tx,
+            shared_snapshot,
+            approval_queue,
+            activity_log,
         }
     }
 
     /// Get a sender for posting events to the orchestrator.
     pub fn event_sender(&self) -> mpsc::Sender<OrchestratorEvent> {
         self.event_tx.clone()
+    }
+
+    /// Get a shared handle to the snapshot for the HTTP server.
+    pub fn shared_snapshot(&self) -> SharedSnapshot {
+        Arc::clone(&self.shared_snapshot)
+    }
+
+    /// Get the shared approval queue for the HTTP server.
+    pub fn approval_queue(&self) -> Arc<PendingApprovalQueue> {
+        Arc::clone(&self.approval_queue)
+    }
+
+    /// Get the shared activity log for the HTTP server.
+    pub fn activity_log(&self) -> Arc<ActivityLog> {
+        Arc::clone(&self.activity_log)
     }
 
     /// Get a snapshot of the current orchestrator state.
@@ -170,6 +209,7 @@ impl Orchestrator {
 
         // Main event loop.
         info!("orchestrator event loop started");
+        self.publish_snapshot();
         while let Some(event) = self.event_rx.recv().await {
             match event {
                 OrchestratorEvent::Tick => {
@@ -201,6 +241,7 @@ impl Orchestrator {
                     break;
                 }
             }
+            self.publish_snapshot();
         }
 
         info!("orchestrator event loop exited");
@@ -338,6 +379,7 @@ impl Orchestrator {
         let wm = Arc::clone(&self.workspace_manager);
         let event_tx = worker_event_tx.clone();
         let orch_event_tx = self.event_tx.clone();
+        let approval_queue = Arc::clone(&self.approval_queue);
 
         tokio::spawn(async move {
             let result = run_worker(
@@ -349,6 +391,7 @@ impl Orchestrator {
                 tracker,
                 wm,
                 event_tx,
+                approval_queue,
             )
             .await;
 
@@ -388,6 +431,10 @@ impl Orchestrator {
                 / 1000.0;
             self.state.codex_totals.seconds_running += elapsed;
         }
+
+        // Clean up approval queue and activity log for this issue.
+        self.approval_queue.remove_by_issue(issue_id);
+        self.activity_log.remove_issue(issue_id);
 
         let entry = self.state.running.remove(issue_id);
         self.state.claimed.remove(issue_id);
@@ -458,6 +505,46 @@ impl Orchestrator {
     /// Handle a codex update event from a running worker.
     fn handle_codex_update(&mut self, issue_id: &str, event: AgentEvent) {
         let now = Utc::now();
+        let now_str = now.to_rfc3339();
+
+        // Build an activity entry for the event.
+        let activity = match &event {
+            AgentEvent::SessionStarted { session_id, .. } => Some(ActivityEntry {
+                event_type: "session_started".to_string(),
+                message: format!("Session started: {}", session_id),
+                timestamp: now_str.clone(),
+            }),
+            AgentEvent::TurnCompleted { .. } => Some(ActivityEntry {
+                event_type: "turn_completed".to_string(),
+                message: "Turn completed".to_string(),
+                timestamp: now_str.clone(),
+            }),
+            AgentEvent::TurnFailed { error, .. } => Some(ActivityEntry {
+                event_type: "turn_failed".to_string(),
+                message: format!("Turn failed: {}", error),
+                timestamp: now_str.clone(),
+            }),
+            AgentEvent::ApprovalRequested { method, .. } => Some(ActivityEntry {
+                event_type: "approval_requested".to_string(),
+                message: format!("Approval requested: {}", method),
+                timestamp: now_str.clone(),
+            }),
+            AgentEvent::ApprovalAutoApproved { .. } => Some(ActivityEntry {
+                event_type: "auto_approved".to_string(),
+                message: "Approval auto-approved".to_string(),
+                timestamp: now_str.clone(),
+            }),
+            AgentEvent::Notification { message, .. } => Some(ActivityEntry {
+                event_type: "notification".to_string(),
+                message: message.clone(),
+                timestamp: now_str.clone(),
+            }),
+            _ => None,
+        };
+
+        if let Some(entry) = activity {
+            self.activity_log.push(issue_id, entry);
+        }
 
         if let Some(entry) = self.state.running.get_mut(issue_id) {
             entry.last_codex_timestamp = Some(now);
@@ -490,6 +577,10 @@ impl Orchestrator {
                 AgentEvent::Notification { message, .. } => {
                     entry.last_codex_message = Some(message.clone());
                     entry.last_codex_event = Some("notification".to_string());
+                }
+                AgentEvent::ApprovalRequested { .. } => {
+                    entry.last_codex_event =
+                        Some("approval_requested".to_string());
                 }
                 AgentEvent::ApprovalAutoApproved { .. } => {
                     entry.last_codex_event = Some("auto_approved".to_string());
@@ -570,6 +661,113 @@ impl Orchestrator {
         self.state.max_concurrent_agents = config.agent_max_concurrent;
         self.config = config;
         self.prompt_template = prompt_template;
+    }
+
+    /// Publish the current state to the shared snapshot for the HTTP server.
+    fn publish_snapshot(&self) {
+        let now = Utc::now();
+        let running: Vec<serde_json::Value> = self
+            .state
+            .running
+            .values()
+            .map(|e| {
+                let activity = self.activity_log.get_entries(&e.issue.id);
+                let activity_json: Vec<serde_json::Value> = activity
+                    .into_iter()
+                    .map(|a| {
+                        serde_json::json!({
+                            "event_type": a.event_type,
+                            "message": a.message,
+                            "timestamp": a.timestamp,
+                        })
+                    })
+                    .collect();
+
+                serde_json::json!({
+                    "issue_id": e.issue.id,
+                    "issue_identifier": e.identifier,
+                    "identifier": e.identifier,
+                    "state": e.issue.state,
+                    "session_id": e.session_id,
+                    "turn_count": e.turn_count,
+                    "last_codex_event": e.last_codex_event,
+                    "last_event": e.last_codex_event,
+                    "last_codex_message": e.last_codex_message,
+                    "last_message": e.last_codex_message,
+                    "last_codex_timestamp": e.last_codex_timestamp.map(|t| t.to_rfc3339()),
+                    "last_event_at": e.last_codex_timestamp.map(|t| t.to_rfc3339()),
+                    "started_at": e.started_at.to_rfc3339(),
+                    "codex_input_tokens": e.codex_input_tokens,
+                    "codex_output_tokens": e.codex_output_tokens,
+                    "codex_total_tokens": e.codex_total_tokens,
+                    "tokens": {
+                        "input_tokens": e.codex_input_tokens,
+                        "output_tokens": e.codex_output_tokens,
+                        "total_tokens": e.codex_total_tokens,
+                    },
+                    "activity": activity_json,
+                })
+            })
+            .collect();
+
+        let retrying: Vec<serde_json::Value> = self
+            .state
+            .retry_attempts
+            .values()
+            .map(|e| {
+                serde_json::json!({
+                    "issue_id": e.issue_id,
+                    "issue_identifier": e.identifier,
+                    "identifier": e.identifier,
+                    "attempt": e.attempt,
+                    "due_at": format!("{}ms", e.due_at_ms),
+                    "error": e.error,
+                })
+            })
+            .collect();
+
+        let pending_approvals: Vec<serde_json::Value> = self
+            .approval_queue
+            .list_pending()
+            .into_iter()
+            .map(|a| {
+                serde_json::json!({
+                    "id": a.id,
+                    "issue_id": a.issue_id,
+                    "issue_identifier": a.issue_identifier,
+                    "method": a.method,
+                    "created_at": a.created_at,
+                })
+            })
+            .collect();
+
+        let snapshot = serde_json::json!({
+            "generated_at": now.to_rfc3339(),
+            "counts": {
+                "running": running.len(),
+                "retrying": retrying.len(),
+            },
+            "running": running,
+            "retrying": retrying,
+            "pending_approvals": pending_approvals,
+            "codex_totals": {
+                "input_tokens": self.state.codex_totals.input_tokens
+                    + self.state.running.values().map(|e| e.codex_input_tokens).sum::<u64>(),
+                "output_tokens": self.state.codex_totals.output_tokens
+                    + self.state.running.values().map(|e| e.codex_output_tokens).sum::<u64>(),
+                "total_tokens": self.state.codex_totals.total_tokens
+                    + self.state.running.values().map(|e| e.codex_total_tokens).sum::<u64>(),
+                "seconds_running": self.state.codex_totals.seconds_running
+                    + self.state.running.values().map(|e| {
+                        (now - e.started_at).num_milliseconds().max(0) as f64 / 1000.0
+                    }).sum::<f64>(),
+            },
+            "rate_limits": self.state.codex_rate_limits,
+        });
+
+        if let Ok(mut guard) = self.shared_snapshot.write() {
+            *guard = snapshot;
+        }
     }
 
     /// Handle graceful shutdown.

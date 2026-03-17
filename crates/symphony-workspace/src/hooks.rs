@@ -19,16 +19,31 @@ pub async fn run_hook(
     script: &str,
     cwd: &Path,
     timeout_ms: u64,
+    issue_id: Option<&str>,
+    issue_identifier: Option<&str>,
 ) -> Result<(), SymphonyError> {
     info!(hook = hook_name, cwd = %cwd.display(), "starting hook");
 
-    let mut child = Command::new("bash")
-        .arg("-lc")
+    let mut cmd = Command::new("bash");
+    cmd.arg("-lc")
         .arg(script)
         .current_dir(cwd)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+        .stderr(std::process::Stdio::piped());
+
+    // Pass issue context as environment variables so hooks can use them
+    // for branch naming, logging, etc.
+    if let Some(id) = issue_id {
+        cmd.env("SYMPHONY_ISSUE_ID", id);
+    }
+    if let Some(ident) = issue_identifier {
+        cmd.env("SYMPHONY_ISSUE_IDENTIFIER", ident);
+        // Also provide just the number (e.g., "68" from "#68").
+        let num = ident.trim_start_matches('#');
+        cmd.env("SYMPHONY_ISSUE_NUMBER", num);
+    }
+
+    let mut child = cmd.spawn()
         .map_err(|e| SymphonyError::HookError {
             hook: hook_name.to_owned(),
             detail: format!("failed to spawn bash: {e}"),
@@ -122,14 +137,14 @@ mod tests {
     #[tokio::test]
     async fn runs_simple_echo() {
         let dir = TempDir::new().unwrap();
-        let result = run_hook("test-echo", "echo hello", dir.path(), 5000).await;
+        let result = run_hook("test-echo", "echo hello", dir.path(), 5000, None, None).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn non_zero_exit_returns_hook_error() {
         let dir = TempDir::new().unwrap();
-        let result = run_hook("test-fail", "exit 1", dir.path(), 5000).await;
+        let result = run_hook("test-fail", "exit 1", dir.path(), 5000, None, None).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             SymphonyError::HookError { hook, .. } => {
@@ -142,7 +157,7 @@ mod tests {
     #[tokio::test]
     async fn timeout_returns_hook_timeout() {
         let dir = TempDir::new().unwrap();
-        let result = run_hook("test-timeout", "sleep 60", dir.path(), 100).await;
+        let result = run_hook("test-timeout", "sleep 60", dir.path(), 100, None, None).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             SymphonyError::HookTimeout { hook, timeout_ms } => {

@@ -164,28 +164,22 @@ async fn main() -> Result<()> {
     });
 
     // 8. Optionally start HTTP server.
+    let shared_snapshot = orchestrator.shared_snapshot();
     let server_port = args.port.or(config.server_port);
     if let Some(port) = server_port {
+        let snapshot_handle = shared_snapshot.clone();
         let snapshot_fn: Arc<dyn Fn() -> serde_json::Value + Send + Sync> =
             Arc::new(move || {
-                serde_json::json!({
-                    "generated_at": chrono::Utc::now().to_rfc3339(),
-                    "counts": { "running": 0, "retrying": 0 },
-                    "running": [],
-                    "retrying": [],
-                    "codex_totals": {
-                        "input_tokens": 0,
-                        "output_tokens": 0,
-                        "total_tokens": 0,
-                        "seconds_running": 0.0
-                    },
-                    "rate_limits": null
-                })
+                snapshot_handle
+                    .read()
+                    .map(|guard| guard.clone())
+                    .unwrap_or_else(|_| serde_json::json!({"error": "snapshot lock poisoned"}))
             });
 
         let app_state = Arc::new(symphony_server::router::AppState {
             orchestrator_tx: orch_tx.clone(),
             snapshot_fn,
+            approval_queue: orchestrator.approval_queue(),
         });
 
         let router = symphony_server::router::create_router(app_state);
@@ -206,47 +200,3 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Parse an `"owner/repo"` project slug into its two components.
-///
-/// # Errors
-///
-/// Returns an error if the slug is not in `"owner/repo"` format.
-fn parse_project_slug(slug: &str) -> Result<(String, String)> {
-    let parts: Vec<&str> = slug.split('/').collect();
-    if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
-        anyhow::bail!(
-            "Invalid project_slug format. Expected 'owner/repo', got '{}'",
-            slug
-        );
-    }
-    Ok((parts[0].to_string(), parts[1].to_string()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_project_slug_valid() {
-        let (owner, repo) = parse_project_slug("octocat/hello-world").unwrap();
-        assert_eq!(owner, "octocat");
-        assert_eq!(repo, "hello-world");
-    }
-
-    #[test]
-    fn parse_project_slug_invalid_no_slash() {
-        assert!(parse_project_slug("no-slash").is_err());
-    }
-
-    #[test]
-    fn parse_project_slug_empty_parts() {
-        assert!(parse_project_slug("/repo").is_err());
-        assert!(parse_project_slug("owner/").is_err());
-    }
-
-    #[test]
-    fn parse_project_slug_too_many_parts() {
-        // "a/b/c" splits into 3 parts.
-        assert!(parse_project_slug("a/b/c").is_err());
-    }
-}
