@@ -100,7 +100,21 @@ pub fn normalize_github_issue(
     })
 }
 
+/// Normalize a string for fuzzy comparison: lowercase, strip hyphens,
+/// underscores, and extra whitespace.
+fn normalize_label(s: &str) -> String {
+    s.to_lowercase()
+        .replace('-', " ")
+        .replace('_', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Derive the workflow state from the GitHub native state and labels.
+///
+/// Matching is fuzzy: "in-progress", "in_progress", "In Progress", and
+/// "in progress" all match the config entry "In Progress".
 fn derive_state(
     native_state: &str,
     labels: &[String],
@@ -110,8 +124,9 @@ fn derive_state(
     match native_state {
         "open" => {
             for label in labels {
+                let normalized = normalize_label(label);
                 for active in active_states {
-                    if label == &active.to_lowercase() {
+                    if normalized == normalize_label(active) {
                         return active.clone();
                     }
                 }
@@ -120,8 +135,9 @@ fn derive_state(
         }
         "closed" => {
             for label in labels {
+                let normalized = normalize_label(label);
                 for terminal in terminal_states {
-                    if label == &terminal.to_lowercase() {
+                    if normalized == normalize_label(terminal) {
                         return terminal.clone();
                     }
                 }
