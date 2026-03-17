@@ -65,14 +65,42 @@ async fn stream_turn_inner(
     // Accumulator for agent message deltas. We collect all the word-by-word
     // delta fragments and emit a single notification when the message completes.
     let mut pending_message = String::new();
+    let mut last_message_at = std::time::Instant::now();
 
     loop {
-        let line = match process.read_line().await? {
-            Some(line) if line.is_empty() => continue,
-            Some(line) => line,
-            None => {
-                info!("agent process exited (EOF)");
-                return Ok(TurnResult::ProcessExited);
+        // Use a 60-second read timeout so we can log a "still waiting" message
+        // and check if the process is still alive during long reasoning phases.
+        let line = match tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            process.read_line(),
+        ).await {
+            Ok(result) => match result? {
+                Some(line) if line.is_empty() => continue,
+                Some(line) => {
+                    last_message_at = std::time::Instant::now();
+                    line
+                }
+                None => {
+                    info!("agent process exited (EOF)");
+                    return Ok(TurnResult::ProcessExited);
+                }
+            },
+            Err(_) => {
+                let idle_secs = last_message_at.elapsed().as_secs();
+                // Check if the process is still alive.
+                match process.try_wait().await {
+                    Ok(Some(status)) => {
+                        info!(status = ?status, "agent process exited during idle wait");
+                        return Ok(TurnResult::ProcessExited);
+                    }
+                    Ok(None) => {
+                        info!(idle_secs, "agent still running, waiting for output (reasoning?)");
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "failed to check agent process status");
+                    }
+                }
+                continue;
             }
         };
 
@@ -101,19 +129,8 @@ async fn stream_turn_inner(
             .unwrap_or("");
         let params = parsed.get("params").cloned().unwrap_or(Value::Null);
 
-        // Log every message method for protocol debugging.
-        let has_id = parsed.get("id").is_some();
-        let has_result = parsed.get("result").is_some();
-        let keys: Vec<&str> = parsed.as_object()
-            .map(|o| o.keys().map(|k| k.as_str()).collect())
-            .unwrap_or_default();
-        info!(
-            method = %method,
-            has_id,
-            has_result,
-            keys = ?keys,
-            "agent message received"
-        );
+        // Log message method at debug level (use RUST_LOG=debug to see).
+        debug!(method = %method, "agent message received");
 
         // Extract usage from any message that carries it (like OpenAI's
         // `metadata_from_message` / `maybe_set_usage`).

@@ -112,13 +112,7 @@ impl AgentProcess {
         // Trim the trailing newline.
         let trimmed = line.trim_end().to_string();
         if !trimmed.is_empty() {
-            let preview: String = trimmed.chars().take(200).collect();
-            info!(
-                bytes = bytes_read,
-                line_len = trimmed.len(),
-                preview = %preview,
-                "read line from agent"
-            );
+            debug!(bytes = bytes_read, line_len = trimmed.len(), "read line from agent");
         }
 
         Ok(Some(trimmed))
