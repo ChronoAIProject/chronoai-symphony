@@ -327,8 +327,48 @@ impl Orchestrator {
                 }
             }
             ReconciliationAction::StallDetected { issue_id } => {
-                warn!(issue_id = %issue_id, "stall detected, removing from running");
-                self.state.running.remove(&issue_id);
+                warn!(issue_id = %issue_id, "stall detected, scheduling retry");
+
+                // Treat stall like an abnormal exit: schedule a retry.
+                if let Some(entry) = self.state.running.remove(&issue_id) {
+                    self.state.claimed.remove(&issue_id);
+                    self.approval_queue.remove_by_issue(&issue_id);
+                    // Don't clear activity log so the UI preserves history.
+
+                    let current_attempt = entry.retry_attempt.unwrap_or(0);
+                    let next_attempt = current_attempt + 1;
+                    let max_backoff = self.config.agent_max_retry_backoff_ms;
+                    let delay_ms = compute_backoff_ms(next_attempt, max_backoff);
+
+                    info!(
+                        issue_id = %issue_id,
+                        attempt = next_attempt,
+                        delay_ms,
+                        "scheduling stall retry"
+                    );
+
+                    self.state.retry_attempts.insert(
+                        issue_id.clone(),
+                        symphony_core::domain::RetryEntry {
+                            issue_id: issue_id.clone(),
+                            identifier: entry.identifier,
+                            attempt: next_attempt,
+                            due_at_ms: delay_ms,
+                            error: Some("stall detected: no output within timeout".to_string()),
+                        },
+                    );
+
+                    let retry_tx = self.event_tx.clone();
+                    let retry_issue_id = issue_id.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        let _ = retry_tx
+                            .send(OrchestratorEvent::RetryTimerFired {
+                                issue_id: retry_issue_id,
+                            })
+                            .await;
+                    });
+                }
             }
         }
     }
