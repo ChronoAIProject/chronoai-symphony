@@ -53,6 +53,7 @@ pub async fn run_worker(
     workspace_manager: Arc<WorkspaceManager>,
     event_tx: mpsc::Sender<(String, AgentEvent)>,
     approval_queue: Arc<PendingApprovalQueue>,
+    mut cancel_rx: tokio::sync::watch::Receiver<bool>,
 ) -> WorkerResult {
     let issue_id = issue.id.clone();
     let identifier = issue.identifier.clone();
@@ -143,6 +144,13 @@ pub async fn run_worker(
     let mut exit_reason = WorkerExitReason::Normal;
 
     for turn_num in 0..max_turns {
+        // Check if we've been cancelled (e.g., stall detection).
+        if *cancel_rx.borrow() {
+            info!(issue_id = %issue_id, "worker cancelled by orchestrator");
+            exit_reason = WorkerExitReason::Abnormal("cancelled by orchestrator".to_string());
+            break;
+        }
+
         let is_first_turn = turn_num == 0;
         let prompt = if is_first_turn {
             rendered_prompt.clone()

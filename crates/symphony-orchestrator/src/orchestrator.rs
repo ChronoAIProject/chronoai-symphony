@@ -69,6 +69,7 @@ pub struct Orchestrator {
     shared_snapshot: SharedSnapshot,
     approval_queue: Arc<PendingApprovalQueue>,
     activity_log: Arc<ActivityLog>,
+    cancel_senders: HashMap<String, tokio::sync::watch::Sender<bool>>,
 }
 
 impl Orchestrator {
@@ -116,6 +117,7 @@ impl Orchestrator {
             shared_snapshot,
             approval_queue,
             activity_log,
+            cancel_senders: HashMap::new(),
         }
     }
 
@@ -327,7 +329,12 @@ impl Orchestrator {
                 }
             }
             ReconciliationAction::StallDetected { issue_id } => {
-                warn!(issue_id = %issue_id, "stall detected, scheduling retry");
+                warn!(issue_id = %issue_id, "stall detected, cancelling worker and scheduling retry");
+
+                // Signal the worker to kill the agent process and exit.
+                if let Some(cancel_tx) = self.cancel_senders.remove(&issue_id) {
+                    let _ = cancel_tx.send(true);
+                }
 
                 // Treat stall like an abnormal exit: schedule a retry.
                 if let Some(entry) = self.state.running.remove(&issue_id) {
@@ -409,7 +416,10 @@ impl Orchestrator {
                 turn_count: 0,
             },
         );
+        // Create a cancellation channel for this worker.
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
         self.state.claimed.insert(issue_id.clone());
+        self.cancel_senders.insert(issue_id.clone(), cancel_tx);
 
         // Spawn worker task.
         let config = self.config.clone();
@@ -432,6 +442,7 @@ impl Orchestrator {
                 wm,
                 event_tx,
                 approval_queue,
+                cancel_rx,
             )
             .await;
 
@@ -451,6 +462,9 @@ impl Orchestrator {
             reason = ?reason,
             "worker exited"
         );
+
+        // Clean up cancellation sender.
+        self.cancel_senders.remove(issue_id);
 
         // Update totals from the running entry before removing it.
         if let Some(entry) = self.state.running.get(issue_id) {
