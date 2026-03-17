@@ -757,10 +757,10 @@ impl Orchestrator {
                     + self.state.running.values().map(|e| e.codex_output_tokens).sum::<u64>(),
                 "total_tokens": self.state.codex_totals.total_tokens
                     + self.state.running.values().map(|e| e.codex_total_tokens).sum::<u64>(),
-                "seconds_running": self.state.codex_totals.seconds_running
-                    + self.state.running.values().map(|e| {
-                        (now - e.started_at).num_milliseconds().max(0) as f64 / 1000.0
-                    }).sum::<f64>(),
+                // Only report completed sessions' runtime here. The dashboard
+                // JS adds running sessions' elapsed time client-side so the
+                // counter ticks smoothly between polls.
+                "seconds_running": self.state.codex_totals.seconds_running,
             },
             "rate_limits": self.state.codex_rate_limits,
         });
