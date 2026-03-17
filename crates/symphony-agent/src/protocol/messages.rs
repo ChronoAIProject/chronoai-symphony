@@ -138,7 +138,7 @@ pub fn default_turn_sandbox_policy(workspace_path: &str) -> Value {
         "type": "workspaceWrite",
         "writableRoots": [workspace_path],
         "readOnlyAccess": {"type": "fullAccess"},
-        "networkAccess": false,
+        "networkAccess": true,
         "excludeTmpdirEnvVar": false,
         "excludeSlashTmp": false
     })
