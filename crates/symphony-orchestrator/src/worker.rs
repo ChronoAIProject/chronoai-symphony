@@ -213,6 +213,8 @@ pub async fn run_worker(
         }
 
         // Check issue state via tracker before next turn.
+        // Stop if the issue has moved to a terminal state OR a handoff
+        // state like "Human Review" where the agent should not continue.
         if turn_num + 1 < max_turns {
             match tracker
                 .fetch_issue_states_by_ids(&[issue_id.clone()])
@@ -231,6 +233,25 @@ pub async fn run_worker(
                                 issue_id = %issue_id,
                                 state = %updated.state,
                                 "issue reached terminal state, stopping"
+                            );
+                            break;
+                        }
+
+                        // Stop if the issue moved to a "handoff" state
+                        // where the agent should wait for human action.
+                        // These are states like "Human Review" where the
+                        // agent has finished its work and is waiting.
+                        let handoff_states = ["human review", "human-review", "humanreview",
+                                              "merging", "blocked"];
+                        let is_handoff = handoff_states
+                            .iter()
+                            .any(|h| normalize_state(h) == normalized);
+
+                        if is_handoff {
+                            info!(
+                                issue_id = %issue_id,
+                                state = %updated.state,
+                                "issue moved to handoff state, stopping worker"
                             );
                             break;
                         }
