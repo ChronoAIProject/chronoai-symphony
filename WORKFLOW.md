@@ -1,7 +1,10 @@
 ---
 tracker:
   kind: github
-  api_key: $GITHUB_TOKEN
+  api_key: $GITHUB_TOKEN               # Option 1: Personal access token
+  # app_id: 123456                      # Option 2: GitHub App (shows as bot)
+  # installation_id: 789012
+  # private_key_path: /path/to/app.pem
   project_slug: your-org/your-repo
   active_states:
     - Todo

@@ -148,9 +148,16 @@ Fix issue {{ issue.identifier }}: {{ issue.title }}.
 ```yaml
 tracker:
   kind: github                          # Required. Only "github" supported.
-  api_key: $GITHUB_TOKEN               # Required. Supports $VAR env references.
   project_slug: owner/repo             # Required. GitHub owner/repo.
   endpoint: https://api.github.com     # Optional. Default shown.
+
+  # Auth option 1: Personal access token
+  api_key: $GITHUB_TOKEN               # Supports $VAR env references.
+
+  # Auth option 2: GitHub App (commits/PRs show as "app-name[bot]")
+  # app_id: 123456                      # App ID from GitHub App settings.
+  # installation_id: 789012             # From the installation URL.
+  # private_key_path: /path/to/app.pem  # RSA private key (.pem file).
   active_states:                        # Optional. Default: Todo, In Progress.
     - Todo
     - In Progress
@@ -447,53 +454,60 @@ Options:
 9. **Reconciliation**: Every tick, running issues are checked against GitHub. Terminal issues trigger workspace cleanup. Non-active issues stop the agent.
 10. **Reload**: Changes to WORKFLOW.md are detected and applied without restart. Config, prompt, hooks, and concurrency limits update live.
 
-## Token Permissions
+## Authentication
 
-Symphony itself only **reads** issues for polling and reconciliation. However, the coding agent subprocess (Codex) inherits `GITHUB_TOKEN` and needs **write** access to push code, create PRs, update labels, and post comments.
+Symphony supports two authentication methods. Both are used by Symphony (for polling) and by the coding agent (for pushing code, creating PRs, updating labels).
 
-### Fine-grained personal access token (recommended)
+### Option 1: Personal Access Token (simple)
 
-Go to **Settings > Developer settings > Personal access tokens > Fine-grained tokens**, select the target repository, and grant:
+Use a fine-grained PAT with these permissions on the target repo:
 
-| Permission | Access | Used by | Why |
-|------------|--------|---------|-----|
-| **Metadata** | Read | Symphony + Agent | Always required by GitHub |
-| **Issues** | Read & Write | Symphony (read), Agent (write) | Poll issues, update labels/state, post comments |
-| **Contents** | Read & Write | Agent | Clone repo, push branches, read/write files |
-| **Pull requests** | Read & Write | Agent | Create and update pull requests |
-| **Workflows** | Read & Write | Agent (optional) | Only if agent needs to modify GitHub Actions |
-
-### Classic personal access token
-
-If using a classic token, grant the `repo` scope (covers all of the above for private repos). For public repos, `public_repo` is sufficient.
-
-### Token setup
+| Permission | Access | Why |
+|------------|--------|-----|
+| **Metadata** | Read | Always required |
+| **Issues** | Read & Write | Poll issues, update labels, post comments |
+| **Contents** | Read & Write | Clone repo, push branches |
+| **Pull requests** | Read & Write | Create and update PRs |
 
 ```bash
-# Fine-grained token (recommended)
 export GITHUB_TOKEN=github_pat_...
-
-# Or classic token
-export GITHUB_TOKEN=ghp_...
 ```
 
-### Who uses the token
+```yaml
+# WORKFLOW.md
+tracker:
+  api_key: $GITHUB_TOKEN
+```
 
+All actions appear under your personal GitHub account.
+
+### Option 2: GitHub App (recommended)
+
+Actions appear as `your-app-name[bot]` with a bot badge. No spare email needed.
+
+**Setup:**
+
+1. Go to **Settings > Developer settings > GitHub Apps > New GitHub App**
+2. Name it (e.g., `my-symphony-bot`)
+3. Set permissions: Issues (R/W), Contents (R/W), Pull Requests (R/W), Metadata (R)
+4. Generate a private key (downloads a `.pem` file)
+5. Install the app on your repository
+6. Note the **installation ID** from the URL: `github.com/settings/installations/{id}`
+
+```yaml
+# WORKFLOW.md
+tracker:
+  app_id: 123456                      # From app settings page
+  installation_id: 789012             # From installation URL
+  private_key_path: /path/to/app.pem  # Downloaded .pem file
+  # api_key is not needed with app auth
 ```
-GITHUB_TOKEN
-    |
-    +---> Symphony (read-only)
-    |       - Poll open/closed issues
-    |       - Fetch issue states for reconciliation
-    |       - Check labels for state mapping
-    |
-    +---> Coding Agent (read + write)
-            - git clone / git push (via hooks or agent tools)
-            - Create pull requests
-            - Add/remove labels (state transitions)
-            - Post comments on issues
-            - Update issue state
-```
+
+Symphony automatically:
+- Generates JWT from the private key
+- Exchanges it for a 1-hour installation token
+- Refreshes the token every 30 minutes
+- Sets `GH_TOKEN` and `GITHUB_TOKEN` for the agent subprocess
 
 ## Security
 
