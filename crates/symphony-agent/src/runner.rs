@@ -307,7 +307,10 @@ impl AgentRunner {
     /// with optional model and max-turns flags.
     fn build_claude_command(&self, max_turns: u32) -> String {
         let mut cmd = self.profile.command.clone();
-        cmd = format!("{cmd} -p \"$SYMPHONY_PROMPT\"");
+        // Read prompt from file to avoid bash expanding $, backticks, etc.
+        // in the prompt content. $(cat ...) output is not re-expanded
+        // when inside double quotes.
+        cmd = format!("{cmd} -p \"$(cat \"$SYMPHONY_PROMPT_FILE\")\"");
         cmd = format!("{cmd} --output-format=stream-json");
         // Only skip permissions when approval_policy is "never" (default).
         // Other policies let Claude prompt for approval (not applicable in
@@ -352,9 +355,15 @@ impl AgentRunner {
             "starting Claude CLI session"
         );
 
-        // Pass prompt via env var to avoid shell escaping issues.
+        // Write prompt to a file to avoid bash expanding $, backticks, etc.
+        // The command reads it via $(cat "$SYMPHONY_PROMPT_FILE").
+        let prompt_file = workspace_path.join(".symphony_prompt");
+        std::fs::write(&prompt_file, prompt).map_err(|e| SymphonyError::ResponseError {
+            detail: format!("failed to write prompt file: {e}"),
+        })?;
+
         let mut env_vars = self.build_env_vars();
-        env_vars.push(("SYMPHONY_PROMPT".to_string(), prompt.to_string()));
+        env_vars.push(("SYMPHONY_PROMPT_FILE".to_string(), prompt_file.to_string_lossy().to_string()));
         let env_refs: Vec<(&str, &str)> =
             env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
 
