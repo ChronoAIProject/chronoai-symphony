@@ -249,6 +249,44 @@ function fmtRateLimits(rl){
     if(m>0)return m+"m "+s+"s";
     return s+"s";
   }
+  function usedColor(pct){return pct<50?"var(--accent)":pct<80?"var(--warning-ink)":"var(--danger)";}
+  function fmtWindow(mins){return mins>=1440?(mins/1440)+"d":mins>=60?(mins/60)+"h":mins+"m";}
+  function renderTier(name,tier){
+    if(!tier||typeof tier!=="object")return"";
+    let used=tier.usedPercent!=null?tier.usedPercent:null;
+    let resets=countdown(tier.resetsAt);
+    let resetTime=tier.resetsAt?new Date(tier.resetsAt*1000).toLocaleTimeString():null;
+    let window=tier.windowDurationMins?fmtWindow(tier.windowDurationMins):null;
+    let html=`<article class="metric-card"><p class="metric-label">${esc(name)}</p>`;
+    if(used!=null){
+      html+=`<p class="metric-value" style="color:${usedColor(used)}">${used}% used</p>`;
+    }
+    let details=[];
+    if(window)details.push(window+" window");
+    if(resets)details.push("resets in "+resets);
+    if(resetTime)details.push(resetTime);
+    if(details.length)html+=`<p class="metric-detail">${details.join(" · ")}</p>`;
+    html+=`</article>`;
+    return html;
+  }
+  // Codex format: { rateLimits: { primary: {...}, secondary: {...}, limitId, planType } }
+  let codexLimits=rl.rateLimits;
+  if(codexLimits&&typeof codexLimits==="object"){
+    let html='<div class="metric-grid" style="margin-top:1rem">';
+    if(codexLimits.planType){
+      html+=`<article class="metric-card"><p class="metric-label">Plan</p><p class="metric-value">${esc(codexLimits.planType)}</p>`;
+      if(codexLimits.limitId)html+=`<p class="metric-detail">${esc(codexLimits.limitId)}</p>`;
+      html+=`</article>`;
+    }
+    if(codexLimits.primary)html+=renderTier("Primary",codexLimits.primary);
+    if(codexLimits.secondary)html+=renderTier("Secondary",codexLimits.secondary);
+    if(codexLimits.credits!=null){
+      html+=`<article class="metric-card"><p class="metric-label">Credits</p><p class="metric-value">${codexLimits.credits!=null?fmt(codexLimits.credits):"unlimited"}</p></article>`;
+    }
+    html+="</div>";
+    return html;
+  }
+  // Claude format: { status, rateLimitType, resetsAt, overageStatus, overageResetsAt }
   let status=rl.status||rl.rateLimitType||"";
   let resetCountdown=countdown(rl.resetsAt);
   let resetTime=rl.resetsAt?new Date(rl.resetsAt*1000).toLocaleTimeString():null;
@@ -256,7 +294,6 @@ function fmtRateLimits(rl){
   let overageTime=rl.overageResetsAt?new Date(rl.overageResetsAt*1000).toLocaleTimeString():null;
   let remaining=rl.remaining!=null?rl.remaining:null;
   let limit=rl.limit!=null?rl.limit:null;
-  let reset=rl.reset!=null?rl.reset+"s":null;
   let html='<div class="metric-grid" style="margin-top:1rem">';
   if(status){
     let badgeClass=status==="allowed"?"state-badge state-badge-active":"state-badge state-badge-danger";
@@ -273,9 +310,7 @@ function fmtRateLimits(rl){
   if(remaining!=null&&limit!=null){
     let pct=Math.round((remaining/limit)*100);
     let color=pct>50?"var(--accent)":pct>20?"var(--warning-ink)":"var(--danger)";
-    html+=`<article class="metric-card"><p class="metric-label">Remaining</p><p class="metric-value" style="color:${color}">${fmt(remaining)} / ${fmt(limit)}</p>`;
-    if(reset)html+=`<p class="metric-detail">Resets in ${reset}</p>`;
-    html+=`</article>`;
+    html+=`<article class="metric-card"><p class="metric-label">Remaining</p><p class="metric-value" style="color:${color}">${fmt(remaining)} / ${fmt(limit)}</p></article>`;
   }
   if(rl.overageStatus){
     let overageBadge=rl.overageStatus==="allowed"?"state-badge state-badge-active":"state-badge state-badge-danger";
