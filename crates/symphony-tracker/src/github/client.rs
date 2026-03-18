@@ -1,5 +1,7 @@
 //! GitHub Issues client implementing the `IssueTracker` trait.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use reqwest::header::{self, HeaderMap, HeaderValue};
 use serde_json::Value;
@@ -8,6 +10,7 @@ use tracing::{info, warn};
 use symphony_core::domain::Issue;
 use symphony_core::error::SymphonyError;
 
+use super::app_token::GitHubAppTokenProvider;
 use super::normalization::normalize_github_issue;
 use crate::traits::IssueTracker;
 
@@ -19,20 +22,53 @@ pub struct GitHubClient {
     repo: String,
     active_states: Vec<String>,
     terminal_states: Vec<String>,
+    /// Static token (PAT auth).
+    static_token: Option<String>,
+    /// Dynamic token provider (GitHub App auth). Takes priority over static_token.
+    token_provider: Option<Arc<GitHubAppTokenProvider>>,
 }
 
 impl GitHubClient {
-    /// Create a new GitHub client.
-    ///
-    /// # Arguments
-    ///
-    /// * `token` - GitHub personal access token for authentication.
-    /// * `project_slug` - Repository in `"owner/repo"` format.
-    /// * `active_states` - Label names representing active workflow states.
-    /// * `terminal_states` - Label names representing terminal workflow states.
-    /// * `endpoint` - Optional API base URL (defaults to `https://api.github.com`).
+    /// Create a new GitHub client with a static token (PAT).
     pub fn new(
         token: &str,
+        project_slug: &str,
+        active_states: Vec<String>,
+        terminal_states: Vec<String>,
+        endpoint: Option<&str>,
+    ) -> Result<Self, SymphonyError> {
+        Self::build(
+            Some(token.to_string()),
+            None,
+            project_slug,
+            active_states,
+            terminal_states,
+            endpoint,
+        )
+    }
+
+    /// Create a new GitHub client with a GitHub App token provider.
+    /// Tokens are refreshed automatically before each request.
+    pub fn new_with_app(
+        token_provider: Arc<GitHubAppTokenProvider>,
+        project_slug: &str,
+        active_states: Vec<String>,
+        terminal_states: Vec<String>,
+        endpoint: Option<&str>,
+    ) -> Result<Self, SymphonyError> {
+        Self::build(
+            None,
+            Some(token_provider),
+            project_slug,
+            active_states,
+            terminal_states,
+            endpoint,
+        )
+    }
+
+    fn build(
+        static_token: Option<String>,
+        token_provider: Option<Arc<GitHubAppTokenProvider>>,
         project_slug: &str,
         active_states: Vec<String>,
         terminal_states: Vec<String>,
@@ -41,14 +77,6 @@ impl GitHubClient {
         let (owner, repo) = parse_project_slug(project_slug)?;
 
         let mut headers = HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {token}")).map_err(
-                |e| SymphonyError::TrackerApiRequest {
-                    detail: format!("invalid auth token header value: {e}"),
-                },
-            )?,
-        );
         headers.insert(
             header::ACCEPT,
             HeaderValue::from_static("application/vnd.github+json"),
@@ -74,7 +102,22 @@ impl GitHubClient {
             repo,
             active_states,
             terminal_states,
+            static_token,
+            token_provider,
         })
+    }
+
+    /// Get a fresh auth token. Uses the app provider if available, otherwise static.
+    async fn get_token(&self) -> Result<String, SymphonyError> {
+        if let Some(ref provider) = self.token_provider {
+            provider.get_token().await
+        } else if let Some(ref token) = self.static_token {
+            Ok(token.clone())
+        } else {
+            Err(SymphonyError::TrackerApiRequest {
+                detail: "no auth token available".to_string(),
+            })
+        }
     }
 
     /// Fetch all pages of issues for the given GitHub state parameter.
@@ -84,6 +127,7 @@ impl GitHubClient {
     ) -> Result<Vec<Value>, SymphonyError> {
         let mut all_items: Vec<Value> = Vec::new();
         let mut page: u32 = 1;
+        let token = self.get_token().await?;
 
         loop {
             let url = format!(
@@ -96,6 +140,7 @@ impl GitHubClient {
             let response = self
                 .http
                 .get(&url)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .send()
                 .await
                 .map_err(|e| SymphonyError::TrackerApiRequest {
@@ -137,6 +182,7 @@ impl GitHubClient {
         &self,
         number: u64,
     ) -> Result<Value, SymphonyError> {
+        let token = self.get_token().await?;
         let url = format!(
             "{}/repos/{}/{}/issues/{}",
             self.endpoint, self.owner, self.repo, number
@@ -145,6 +191,7 @@ impl GitHubClient {
         let response = self
             .http
             .get(&url)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
             .send()
             .await
             .map_err(|e| SymphonyError::TrackerApiRequest {

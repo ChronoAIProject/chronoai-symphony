@@ -99,27 +99,31 @@ async fn main() -> Result<()> {
             None
         };
 
-    // Get the initial API token.
-    let api_token = if let Some(ref provider) = app_token_provider {
-        provider.get_token().await.map_err(|e| {
-            anyhow::anyhow!("failed to get GitHub App installation token: {e}")
-        })?
+    // Create the GitHub client with the appropriate auth method.
+    let github_client = if let Some(ref provider) = app_token_provider {
+        // GitHub App: pass the token provider so the client gets fresh tokens.
+        symphony_tracker::github::client::GitHubClient::new_with_app(
+            Arc::clone(provider),
+            &config.tracker_project_slug,
+            config.tracker_active_states.clone(),
+            config.tracker_terminal_states.clone(),
+            endpoint,
+        )
     } else {
         if config.tracker_api_key.is_empty() {
             return Err(anyhow::anyhow!(
                 "either tracker.api_key or GitHub App config (app_id + installation_id + private_key_path) is required"
             ));
         }
-        config.tracker_api_key.clone()
-    };
-
-    let github_client = symphony_tracker::github::client::GitHubClient::new(
-        &api_token,
-        &config.tracker_project_slug,
-        config.tracker_active_states.clone(),
-        config.tracker_terminal_states.clone(),
-        endpoint,
-    )
+        // PAT: static token baked into the client.
+        symphony_tracker::github::client::GitHubClient::new(
+            &config.tracker_api_key,
+            &config.tracker_project_slug,
+            config.tracker_active_states.clone(),
+            config.tracker_terminal_states.clone(),
+            endpoint,
+        )
+    }
     .map_err(|e| {
         tracing::error!(error = %e, "failed to create GitHub client");
         anyhow::anyhow!("failed to create GitHub client: {e}")
