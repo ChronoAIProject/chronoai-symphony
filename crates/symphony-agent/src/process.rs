@@ -14,7 +14,7 @@ use tracing::{debug, error, info};
 pub struct AgentProcess {
     child: Child,
     stdout: BufReader<tokio::process::ChildStdout>,
-    stdin: tokio::process::ChildStdin,
+    stdin: Option<tokio::process::ChildStdin>,
 }
 
 impl AgentProcess {
@@ -89,8 +89,15 @@ impl AgentProcess {
         cmd.arg("-lc")
             .arg(&shell_command)
             .current_dir(cwd)
-            .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped());
+
+        // Codex needs piped stdin for JSON-RPC messages.
+        // Claude CLI hangs with piped stdin - use null instead.
+        if merge_stderr {
+            cmd.stdin(std::process::Stdio::piped());
+        } else {
+            cmd.stdin(std::process::Stdio::null());
+        }
 
         // When merging stderr (Codex), stderr is already in stdout via 2>&1.
         // When not merging (Claude CLI), pipe stderr separately and log it
@@ -123,12 +130,7 @@ impl AgentProcess {
                 detail: "failed to capture agent stdout".to_string(),
             })?;
 
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| SymphonyError::ResponseError {
-                detail: "failed to capture agent stdin".to_string(),
-            })?;
+        let stdin = child.stdin.take();
 
         // Drain stderr in a background task if piped (non-merged mode).
         if !merge_stderr {
@@ -155,24 +157,30 @@ impl AgentProcess {
     }
 
     /// Write a JSON message to the agent's stdin, followed by a newline.
+    /// Only works when stdin is piped (Codex mode). Returns an error if
+    /// stdin is not available (Claude CLI mode).
     pub async fn write_message(&mut self, msg: &str) -> Result<(), SymphonyError> {
+        let stdin = self.stdin.as_mut().ok_or_else(|| SymphonyError::ResponseError {
+            detail: "stdin not available (agent launched without piped stdin)".to_string(),
+        })?;
+
         debug!(msg_len = msg.len(), "writing message to agent");
 
-        self.stdin
+        stdin
             .write_all(msg.as_bytes())
             .await
             .map_err(|e| SymphonyError::ResponseError {
                 detail: format!("failed to write to agent stdin: {e}"),
             })?;
 
-        self.stdin
+        stdin
             .write_all(b"\n")
             .await
             .map_err(|e| SymphonyError::ResponseError {
                 detail: format!("failed to write newline to agent stdin: {e}"),
             })?;
 
-        self.stdin.flush().await.map_err(|e| SymphonyError::ResponseError {
+        stdin.flush().await.map_err(|e| SymphonyError::ResponseError {
             detail: format!("failed to flush agent stdin: {e}"),
         })?;
 
