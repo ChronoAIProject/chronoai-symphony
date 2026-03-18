@@ -42,9 +42,13 @@ agent:
   max_retry_backoff_ms: 300000
 
 codex:
-  command: codex app-server
+  command: codex app-server             # Or: claude-app-server (for Claude Code)
   approval_policy: never
   thread_sandbox: workspace-write
+  # model: gpt-5.3-codex               # Optional. Model to use.
+  # reasoning_effort: xhigh             # Optional. low, medium, high, xhigh.
+  network_access: true                  # Allow agent to access network (default: true).
+  auto_merge: false                     # Auto-merge PR after human approval (default: false).
   turn_timeout_ms: 3600000
   read_timeout_ms: 5000
   stall_timeout_ms: 600000

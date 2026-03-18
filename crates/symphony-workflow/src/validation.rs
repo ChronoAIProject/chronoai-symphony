@@ -137,6 +137,10 @@ mod tests {
             github_app_id: None,
             github_app_installation_id: None,
             github_app_private_key_path: None,
+            codex_model: None,
+            codex_reasoning_effort: None,
+            codex_network_access: true,
+            codex_auto_merge: false,
         }
     }
 

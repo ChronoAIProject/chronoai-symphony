@@ -73,10 +73,30 @@ impl AgentRunner {
     }
 
     fn resolve_turn_sandbox_policy(&self, workspace_path: &str) -> Value {
-        match &self.config.codex_turn_sandbox_policy {
+        let mut policy = match &self.config.codex_turn_sandbox_policy {
             Some(s) => serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.clone())),
             None => default_turn_sandbox_policy(workspace_path),
+        };
+        // Override networkAccess from config.
+        if let Some(obj) = policy.as_object_mut() {
+            obj.insert(
+                "networkAccess".to_string(),
+                Value::Bool(self.config.codex_network_access),
+            );
         }
+        policy
+    }
+
+    /// Build the agent command with optional model and reasoning effort flags.
+    fn build_command(&self, base_command: &str) -> String {
+        let mut cmd = base_command.to_string();
+        if let Some(ref model) = self.config.codex_model {
+            cmd = format!("{cmd} --model {model}");
+        }
+        if let Some(ref effort) = self.config.codex_reasoning_effort {
+            cmd = format!("{cmd} --config model_reasoning_effort={effort}");
+        }
+        cmd
     }
 
     /// Start a new agent session: launch process and perform handshake.
@@ -87,7 +107,9 @@ impl AgentRunner {
         prompt: &str,
         event_tx: &mpsc::Sender<AgentEvent>,
     ) -> Result<AgentSession, SymphonyError> {
-        let command = &self.config.codex_command;
+        // Build the command with optional model and reasoning effort flags.
+        let base_command = &self.config.codex_command;
+        let command = self.build_command(base_command);
         let cwd = workspace_path.to_string_lossy().to_string();
 
         let ap = self.resolve_approval_policy();
@@ -103,7 +125,7 @@ impl AgentRunner {
             "starting agent session"
         );
 
-        let mut process = match AgentProcess::launch(command, workspace_path).await {
+        let mut process = match AgentProcess::launch(&command, workspace_path).await {
             Ok(p) => p,
             Err(e) => {
                 error!(error = %e, "failed to launch agent process");

@@ -61,6 +61,10 @@ pub struct ServiceConfig {
     pub codex_turn_timeout_ms: u64,
     pub codex_read_timeout_ms: u64,
     pub codex_stall_timeout_ms: i64,
+    pub codex_model: Option<String>,
+    pub codex_reasoning_effort: Option<String>,
+    pub codex_network_access: bool,
+    pub codex_auto_merge: bool,
 
     // -- server --
     pub server_port: Option<u16>,
@@ -172,6 +176,14 @@ impl ServiceConfig {
             .unwrap_or(5_000);
         let codex_stall_timeout_ms = get_i64(&codex, "stall_timeout_ms")
             .unwrap_or(300_000);
+        let codex_model = get_str(&codex, "model");
+        let codex_reasoning_effort = get_str(&codex, "reasoning_effort");
+        let codex_network_access = get_str(&codex, "network_access")
+            .map(|v| v.to_lowercase() != "false")
+            .unwrap_or(true);
+        let codex_auto_merge = get_str(&codex, "auto_merge")
+            .map(|v| v.to_lowercase() == "true")
+            .unwrap_or(false);
 
         // -- server --
         let server_port = get_u64(&server, "port").map(|v| v as u16);
@@ -200,6 +212,10 @@ impl ServiceConfig {
             codex_turn_timeout_ms,
             codex_read_timeout_ms,
             codex_stall_timeout_ms,
+            codex_model,
+            codex_reasoning_effort,
+            codex_network_access,
+            codex_auto_merge,
             server_port,
         })
     }

@@ -199,10 +199,14 @@ agent:
     todo: 3
 
 codex:
-  command: codex app-server            # Agent launch command. Default shown.
-  approval_policy: never               # Auto-approve all actions. Valid: untrusted,
+  command: codex app-server            # Agent command. Or: claude-app-server
+  approval_policy: never               # Auto-approve. Valid: untrusted,
                                         # on-failure, on-request, granular, never.
   thread_sandbox: workspace-write      # Sandbox mode. Default: workspace-write.
+  model: gpt-5.3-codex                 # Optional. Passed as --model to agent.
+  reasoning_effort: xhigh              # Optional. low, medium, high, xhigh.
+  network_access: true                 # Allow network in sandbox. Default: true.
+  auto_merge: false                    # Auto-merge after approval. Default: false.
   turn_timeout_ms: 3600000             # Turn timeout. Default: 1 hour.
   read_timeout_ms: 5000                # Startup handshake timeout. Default: 5s.
   stall_timeout_ms: 300000             # Inactivity timeout. Default: 5 min. <=0 disables.
@@ -453,6 +457,26 @@ Options:
 8. **Retry**: On failure, exponential backoff retries are scheduled. On normal exit, a 1-second continuation retry re-checks issue state.
 9. **Reconciliation**: Every tick, running issues are checked against GitHub. Terminal issues trigger workspace cleanup. Non-active issues stop the agent.
 10. **Reload**: Changes to WORKFLOW.md are detected and applied without restart. Config, prompt, hooks, and concurrency limits update live.
+
+## Supported Agents
+
+Symphony works with any coding agent that implements the Codex app-server JSON-RPC protocol:
+
+| Agent | Command | Notes |
+|-------|---------|-------|
+| [OpenAI Codex](https://github.com/openai/codex) | `codex app-server` | Default. The reference implementation. |
+| [Claude Code](https://github.com/sumansid/claude-app-server) | `claude-app-server` | Drop-in replacement using Claude. |
+
+Change the `codex.command` field to switch agents:
+
+```yaml
+codex:
+  command: claude-app-server           # Use Claude instead of Codex
+  model: claude-sonnet-4-6             # Claude model
+  reasoning_effort: high
+```
+
+Both agents use the same protocol, so switching is just a config change. You can even run different agents for different repos by using different WORKFLOW.md files.
 
 ## Authentication
 
