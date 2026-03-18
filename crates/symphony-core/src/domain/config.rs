@@ -101,6 +101,9 @@ pub struct ServiceConfig {
     pub agent_max_turns: u32,
     pub agent_max_retry_backoff_ms: u64,
     pub agent_max_concurrent_by_state: HashMap<String, u32>,
+    /// If set, only issues with this label are dispatched.
+    /// Prevents unauthorized issue creation from triggering agent runs.
+    pub agent_require_label: Option<String>,
 
     // -- agent profiles (multi-agent support) --
     pub agent_profiles: HashMap<String, AgentProfileConfig>,
@@ -209,6 +212,7 @@ impl ServiceConfig {
         };
 
         // -- agent --
+        let agent_require_label = get_str(&agent, "require_label");
         let agent_max_concurrent = get_u32(&agent, "max_concurrent_agents")
             .unwrap_or(10);
         let agent_max_turns = get_u32(&agent, "max_turns").unwrap_or(20);
@@ -263,6 +267,7 @@ impl ServiceConfig {
             agent_max_turns,
             agent_max_retry_backoff_ms,
             agent_max_concurrent_by_state,
+            agent_require_label,
             agent_profiles,
             default_agent,
             codex_command,

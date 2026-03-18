@@ -36,6 +36,21 @@ pub fn is_dispatch_eligible(
         return false;
     }
 
+    // If require_label is set, the issue must have that label to be dispatched.
+    // This prevents unauthorized issues (e.g., from public users) from triggering
+    // agent runs. Only collaborators can add labels.
+    if let Some(ref required) = config.agent_require_label {
+        let required_lower = required.to_lowercase();
+        if !issue.labels.iter().any(|l| l.to_lowercase() == required_lower) {
+            debug!(
+                issue_id = %issue.id,
+                required_label = %required,
+                "skipping issue: missing required label"
+            );
+            return false;
+        }
+    }
+
     let normalized_state = normalize_state(&issue.state);
 
     // State must be in active_states.
@@ -224,6 +239,7 @@ mod tests {
             agent_max_turns: 20,
             agent_max_retry_backoff_ms: 300_000,
             agent_max_concurrent_by_state: HashMap::new(),
+            agent_require_label: None,
             agent_profiles,
             default_agent: "codex".to_string(),
             codex_command: "codex app-server".to_string(),

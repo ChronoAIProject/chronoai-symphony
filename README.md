@@ -196,6 +196,8 @@ agent:
   max_turns: 20                         # Max turns per agent session. Default: 20.
   max_retry_backoff_ms: 300000         # Max retry delay. Default: 5 minutes.
   auto_merge: false                    # Auto-merge after approval. Default: false.
+  require_label: symphony              # Only dispatch issues with this label.
+                                        # Prevents public users from triggering runs.
   max_concurrent_agents_by_state:      # Optional per-state concurrency limits.
     in progress: 5
     todo: 3
@@ -575,12 +577,13 @@ Symphony automatically:
 
 ## Security
 
+- **Public repo protection:** Set `agent.require_label: symphony` so only issues with that label are dispatched. Public users can create issues but cannot add labels (only collaborators can).
 - Workspace paths are sanitized and validated to stay within the configured root
 - API tokens are resolved from environment variables, never stored in config files
 - Secrets are not logged
 - Hooks run inside workspace directories only
-- The HTTP server binds to `127.0.0.1` by default
-- This implementation targets trusted environments with auto-approved agent actions
+- The HTTP server binds to `0.0.0.0` (use firewall rules to restrict access)
+- GitHub App tokens auto-refresh and are short-lived (1 hour)
 
 ## Acknowledgments
 

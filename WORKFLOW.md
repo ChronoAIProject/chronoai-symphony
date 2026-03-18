@@ -42,6 +42,8 @@ agent:
   max_turns: 20
   max_retry_backoff_ms: 300000
   auto_merge: false                     # Auto-merge PR after approval (default: false).
+  # require_label: symphony             # Only dispatch issues with this label. Prevents
+                                        # public users from triggering agent runs.
 
 # Multiple named agents. Add `agent:claude` label to an issue to use Claude.
 agents:
