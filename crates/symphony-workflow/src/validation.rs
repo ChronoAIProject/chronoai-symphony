@@ -68,9 +68,13 @@ fn validate_tracker_kind(config: &ServiceConfig) -> Result<(), SymphonyError> {
 }
 
 fn validate_tracker_api_key(config: &ServiceConfig) -> Result<(), SymphonyError> {
-    if config.tracker_api_key.trim().is_empty() {
+    let has_app_auth = config.github_app_id.is_some()
+        && config.github_app_installation_id.is_some()
+        && config.github_app_private_key_path.is_some();
+
+    if config.tracker_api_key.trim().is_empty() && !has_app_auth {
         return Err(SymphonyError::ConfigValidation {
-            detail: "tracker_api_key is required and must not be empty".to_string(),
+            detail: "tracker_api_key or GitHub App config (app_id + installation_id + private_key_path) is required".to_string(),
         });
     }
     Ok(())
