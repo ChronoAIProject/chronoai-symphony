@@ -3,7 +3,7 @@ use std::path::Path;
 use symphony_core::error::SymphonyError;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Maximum number of characters to capture from stdout/stderr for logging.
 const MAX_OUTPUT_CHARS: usize = 1000;
@@ -83,7 +83,9 @@ pub async fn run_hook(
                 info!(hook = hook_name, stdout = %stdout, "hook stdout");
             }
             if !stderr.is_empty() {
-                warn!(hook = hook_name, stderr = %stderr, "hook stderr");
+                // Log stderr as debug, not warn - most tools (git, cargo, npm)
+                // write normal progress output to stderr.
+                debug!(hook = hook_name, stderr = %stderr, "hook stderr");
             }
 
             if status.success() {
