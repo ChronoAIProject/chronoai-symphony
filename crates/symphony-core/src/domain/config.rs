@@ -317,11 +317,13 @@ impl ServiceConfig {
     /// 3. Configured default agent
     pub fn resolve_agent_for_issue(&self, issue: &Issue) -> &AgentProfileConfig {
         // 1. Check state-based agent mapping.
-        let normalized_state = issue.state.to_lowercase().replace('-', " ");
+        // Normalize both sides: lowercase, hyphens/underscores → spaces.
+        let normalize = |s: &str| -> String {
+            s.to_lowercase().replace('-', " ").replace('_', " ")
+        };
+        let issue_state_norm = normalize(&issue.state);
         for (state_key, agent_name) in &self.agent_by_state {
-            if *state_key == normalized_state
-                || *state_key == issue.state.to_lowercase()
-            {
+            if normalize(state_key) == issue_state_norm {
                 if let Some(profile) = self.agent_profiles.get(agent_name) {
                     return profile;
                 }
