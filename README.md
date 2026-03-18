@@ -10,6 +10,20 @@ Symphony is a long-running automation service that:
 - Manages retries with exponential backoff
 - Provides an HTTP dashboard and JSON API for observability
 
+## Agent-Assisted Setup
+
+The fastest way to set up Symphony for your project is to ask your coding agent to do it. Paste this prompt into Claude Code, Codex, or any coding agent:
+
+```
+Set up Symphony for my repository based on
+https://github.com/ChronoAIProject/chronoai-symphony/blob/main/README.md
+
+My repository: <owner>/<repo>
+Tech stack: <your stack, e.g., "Rust + React", "Python + FastAPI", "Node.js + Next.js">
+```
+
+The agent will read this README and create a tailored `WORKFLOW.md` with the right hooks, prompt template, and architecture rules for your project.
+
 ## Quick Start
 
 ### Prerequisites
