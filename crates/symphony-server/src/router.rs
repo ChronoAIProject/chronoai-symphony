@@ -67,15 +67,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 
 /// Start the HTTP server on the given port.
 ///
-/// Binds to `127.0.0.1:<port>` and serves the provided router until the
-/// process is terminated.
+/// Binds to `0.0.0.0:<port>` and serves the provided router until the
+/// process is terminated. Accessible from any network interface.
 ///
 /// # Errors
 ///
 /// Returns an error if the port is already in use or the listener cannot
 /// be created.
 pub async fn start_server(router: Router, port: u16) -> Result<(), anyhow::Error> {
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("HTTP server listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, router).await?;
