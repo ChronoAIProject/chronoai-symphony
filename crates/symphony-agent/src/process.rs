@@ -42,6 +42,49 @@ impl AgentProcess {
         } else {
             command.to_string()
         };
+
+        // If SYMPHONY_TOKEN_FILE is set (GitHub App auth), create a
+        // wrapper bin directory with a `gh` script that re-reads the token
+        // from the file before each invocation. This directory is prepended
+        // to PATH so all subprocesses (including codex/claude agent) use
+        // the wrapper instead of the real `gh`, ensuring fresh tokens.
+        let has_token_file = env_vars.iter().any(|(k, _)| *k == "SYMPHONY_TOKEN_FILE");
+        let wrapper_dir = if has_token_file {
+            let token_file = env_vars.iter()
+                .find(|(k, _)| *k == "SYMPHONY_TOKEN_FILE")
+                .map(|(_, v)| *v)
+                .unwrap_or("");
+
+            let wrapper_dir = cwd.join(".symphony_bin");
+            let _ = std::fs::create_dir_all(&wrapper_dir);
+
+            // Create a `gh` wrapper script.
+            let gh_wrapper = wrapper_dir.join("gh");
+            let real_gh = std::process::Command::new("which")
+                .arg("gh")
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|| "gh".to_string());
+            let _ = std::fs::write(
+                &gh_wrapper,
+                format!(
+                    "#!/bin/sh\nexport GH_TOKEN=$(cat '{}')\nexport GITHUB_TOKEN=\"$GH_TOKEN\"\nexec '{}' \"$@\"\n",
+                    token_file, real_gh
+                ),
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&gh_wrapper, std::fs::Permissions::from_mode(0o755));
+            }
+
+            Some(wrapper_dir)
+        } else {
+            None
+        };
+
         let mut cmd = Command::new("bash");
         cmd.arg("-lc")
             .arg(&shell_command)
@@ -49,6 +92,12 @@ impl AgentProcess {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
+
+        // Prepend wrapper bin dir to PATH if using token file.
+        if let Some(ref wrapper) = wrapper_dir {
+            let current_path = std::env::var("PATH").unwrap_or_default();
+            cmd.env("PATH", format!("{}:{}", wrapper.display(), current_path));
+        }
 
         for (key, value) in env_vars {
             cmd.env(key, value);

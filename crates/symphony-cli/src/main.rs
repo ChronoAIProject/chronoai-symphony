@@ -132,35 +132,73 @@ async fn main() -> Result<()> {
     let tracker: Arc<dyn symphony_tracker::traits::IssueTracker> =
         Arc::new(github_client);
 
-    // If using GitHub App, set GH_TOKEN and GITHUB_TOKEN env vars so the
-    // agent process and hooks can use gh CLI and git push.
+    // If using GitHub App, write token to a file and configure gh/git to
+    // read from it. This ensures long-running agent sessions always use
+    // a fresh token, since env vars set at launch time can't be updated
+    // in running child processes.
+    let token_file_path = config.workspace_root.join(".symphony_token");
     if let Some(ref provider) = app_token_provider {
         let token = provider.get_token().await.map_err(|e| {
             anyhow::anyhow!("failed to get GitHub App token for agent: {e}")
         })?;
-        // Set env vars for child processes (hooks and codex agent).
-        // SAFETY: We are single-threaded at this point during startup.
+
+        // Write token to file and create a helper script that `gh` can use.
+        std::fs::create_dir_all(&config.workspace_root).ok();
+        std::fs::write(&token_file_path, &token).map_err(|e| {
+            anyhow::anyhow!("failed to write token file: {e}")
+        })?;
+
+        // Create a gh-token helper script that reads the latest token
+        // from the file. This is used as GH_TOKEN via command substitution
+        // in the agent's shell wrapper, so `gh` always gets a fresh token
+        // even in long-running sessions.
+        let helper_script_path = config.workspace_root.join(".symphony_gh_token.sh");
+        std::fs::write(
+            &helper_script_path,
+            format!("#!/bin/sh\ncat '{}'", token_file_path.display()),
+        ).ok();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&helper_script_path, std::fs::Permissions::from_mode(0o755)).ok();
+        }
+
+        // Set env vars pointing to the token file and the current token.
+        // GH_TOKEN and GITHUB_TOKEN are set for child processes launched
+        // after this point (hooks, agent). For long-running sessions, the
+        // agent should use SYMPHONY_TOKEN_FILE to re-read the latest token.
+        // SAFETY: single-threaded at startup.
         unsafe {
             std::env::set_var("GH_TOKEN", &token);
             std::env::set_var("GITHUB_TOKEN", &token);
+            std::env::set_var("SYMPHONY_TOKEN_FILE", &token_file_path);
         }
-        tracing::info!("set GH_TOKEN and GITHUB_TOKEN for agent subprocess");
+        tracing::info!(
+            token_file = %token_file_path.display(),
+            "wrote GitHub App token to file"
+        );
 
         // Spawn a background task to refresh the token every 30 minutes.
+        // Updates both the file and env vars (for newly spawned processes).
         let refresh_provider = Arc::clone(provider);
+        let refresh_token_path = token_file_path.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(1800));
             loop {
                 interval.tick().await;
                 match refresh_provider.get_token().await {
                     Ok(new_token) => {
-                        // SAFETY: env var mutation is the only way to pass
-                        // refreshed tokens to child processes.
+                        // Update the token file (running agents read from this).
+                        if let Err(e) = std::fs::write(&refresh_token_path, &new_token) {
+                            tracing::error!(error = %e, "failed to update token file");
+                            continue;
+                        }
+                        // Update env vars (for newly spawned processes).
                         unsafe {
                             std::env::set_var("GH_TOKEN", &new_token);
                             std::env::set_var("GITHUB_TOKEN", &new_token);
                         }
-                        tracing::info!("refreshed GitHub App token");
+                        tracing::info!("refreshed GitHub App token (file + env)");
                     }
                     Err(e) => {
                         tracing::error!(error = %e, "failed to refresh GitHub App token");

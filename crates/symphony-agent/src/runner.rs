@@ -112,6 +112,10 @@ impl AgentRunner {
     /// Collect environment variables to pass to the agent subprocess.
     /// These are set per-process (not global) so parallel agents with
     /// different configs don't conflict.
+    ///
+    /// If a `SYMPHONY_TOKEN_FILE` env var is set (GitHub App auth), reads
+    /// the latest token from the file and sets `GH_TOKEN` / `GITHUB_TOKEN`
+    /// on the subprocess. This ensures each new session gets a fresh token.
     fn build_env_vars(&self) -> Vec<(String, String)> {
         let mut vars = Vec::new();
         if let Some(ref model) = self.profile.model {
@@ -121,6 +125,22 @@ impl AgentRunner {
             vars.push(("MODEL_REASONING_EFFORT".to_string(), effort.clone()));
             vars.push(("SYMPHONY_REASONING_EFFORT".to_string(), effort.clone()));
         }
+
+        // If using GitHub App auth, pass the token file path so the
+        // agent can re-read fresh tokens. We also pass a fresh token
+        // for the initial launch, but for long-running sessions the
+        // agent should use the token file.
+        if let Ok(token_file) = std::env::var("SYMPHONY_TOKEN_FILE") {
+            vars.push(("SYMPHONY_TOKEN_FILE".to_string(), token_file.clone()));
+            if let Ok(fresh_token) = std::fs::read_to_string(&token_file) {
+                let token = fresh_token.trim().to_string();
+                if !token.is_empty() {
+                    vars.push(("GH_TOKEN".to_string(), token.clone()));
+                    vars.push(("GITHUB_TOKEN".to_string(), token));
+                }
+            }
+        }
+
         vars
     }
 
