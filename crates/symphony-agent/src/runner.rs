@@ -295,6 +295,9 @@ impl AgentRunner {
         if let Some(ref model) = self.profile.model {
             cmd = format!("{cmd} --model {model}");
         }
+        if let Some(ref effort) = self.profile.reasoning_effort {
+            cmd = format!("{cmd} --effort {effort}");
+        }
         cmd
     }
 
