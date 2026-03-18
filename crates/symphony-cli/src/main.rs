@@ -181,10 +181,6 @@ async fn main() -> Result<()> {
         ),
     );
 
-    let agent_runner = Arc::new(
-        symphony_agent::runner::AgentRunner::new(config.clone()),
-    );
-
     // 5. Startup terminal cleanup.
     symphony_orchestrator::cleanup::startup_terminal_cleanup(
         tracker.as_ref(),
@@ -199,7 +195,6 @@ async fn main() -> Result<()> {
         workflow.prompt_template.clone(),
         tracker.clone(),
         workspace_manager.clone(),
-        agent_runner,
     );
 
     let orch_tx = orchestrator.event_sender();

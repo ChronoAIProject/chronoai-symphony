@@ -37,21 +37,34 @@ hooks:
   timeout_ms: 300000
 
 agent:
+  default: codex                        # Which agent to use by default.
   max_concurrent_agents: 5
   max_turns: 20
   max_retry_backoff_ms: 300000
+  auto_merge: false                     # Auto-merge PR after approval (default: false).
 
-codex:
-  command: codex app-server             # Or: claude-app-server (for Claude Code)
-  approval_policy: never
-  thread_sandbox: workspace-write
-  # model: gpt-5.3-codex               # Optional. Model to use.
-  # reasoning_effort: xhigh             # Optional. low, medium, high, xhigh.
-  network_access: true                  # Allow agent to access network (default: true).
-  auto_merge: false                     # Auto-merge PR after human approval (default: false).
-  turn_timeout_ms: 3600000
-  read_timeout_ms: 5000
-  stall_timeout_ms: 600000
+# Multiple named agents. Add `agent:claude` label to an issue to use Claude.
+agents:
+  codex:
+    command: codex app-server
+    approval_policy: never
+    thread_sandbox: workspace-write
+    # model: gpt-5.3-codex
+    # reasoning_effort: xhigh
+    network_access: true
+    turn_timeout_ms: 3600000
+    read_timeout_ms: 5000
+    stall_timeout_ms: 600000
+  # claude:
+  #   command: claude-app-server
+  #   approval_policy: never
+  #   thread_sandbox: workspace-write
+  #   model: claude-sonnet-4-6
+  #   reasoning_effort: high
+  #   network_access: true
+  #   turn_timeout_ms: 3600000
+  #   read_timeout_ms: 5000
+  #   stall_timeout_ms: 600000
 
 server:
   port: 8080

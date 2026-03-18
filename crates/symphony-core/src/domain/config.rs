@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, SymphonyError};
 
+use super::issue::Issue;
 use super::workflow::WorkflowDefinition;
 
 /// Configuration for hook scripts executed at various lifecycle points.
@@ -16,6 +17,25 @@ pub struct HooksConfig {
     pub after_run: Option<String>,
     pub before_remove: Option<String>,
     pub timeout_ms: u64,
+}
+
+/// Configuration for a single named agent profile.
+///
+/// Each profile describes how to launch and communicate with a specific
+/// agent backend (e.g. Codex, Claude Code). Multiple profiles can coexist
+/// in a single workflow, selected per-issue via labels.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AgentProfileConfig {
+    pub command: String,
+    pub approval_policy: Option<String>,
+    pub thread_sandbox: Option<String>,
+    pub turn_sandbox_policy: Option<String>,
+    pub turn_timeout_ms: u64,
+    pub read_timeout_ms: u64,
+    pub stall_timeout_ms: i64,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub network_access: bool,
 }
 
 /// Fully resolved service configuration with typed fields and applied defaults.
@@ -53,7 +73,11 @@ pub struct ServiceConfig {
     pub agent_max_retry_backoff_ms: u64,
     pub agent_max_concurrent_by_state: HashMap<String, u32>,
 
-    // -- codex --
+    // -- agent profiles (multi-agent support) --
+    pub agent_profiles: HashMap<String, AgentProfileConfig>,
+    pub default_agent: String,
+
+    // -- codex (backward-compatible fields, populated from default profile) --
     pub codex_command: String,
     pub codex_approval_policy: Option<String>,
     pub codex_thread_sandbox: Option<String>,
@@ -163,27 +187,32 @@ impl ServiceConfig {
             .unwrap_or(300_000);
         let agent_max_concurrent_by_state =
             get_str_u32_map(&agent, "max_concurrent_agents_by_state");
-
-        // -- codex --
-        let codex_command = get_str(&codex, "command")
-            .unwrap_or_else(|| "codex app-server".to_owned());
-        let codex_approval_policy = get_str(&codex, "approval_policy");
-        let codex_thread_sandbox = get_str(&codex, "thread_sandbox");
-        let codex_turn_sandbox_policy = get_str(&codex, "turn_sandbox_policy");
-        let codex_turn_timeout_ms = get_u64(&codex, "turn_timeout_ms")
-            .unwrap_or(3_600_000);
-        let codex_read_timeout_ms = get_u64(&codex, "read_timeout_ms")
-            .unwrap_or(5_000);
-        let codex_stall_timeout_ms = get_i64(&codex, "stall_timeout_ms")
-            .unwrap_or(300_000);
-        let codex_model = get_str(&codex, "model");
-        let codex_reasoning_effort = get_str(&codex, "reasoning_effort");
-        let codex_network_access = get_str(&codex, "network_access")
-            .map(|v| v.to_lowercase() != "false")
-            .unwrap_or(true);
-        let codex_auto_merge = get_str(&codex, "auto_merge")
+        let codex_auto_merge = get_str(&agent, "auto_merge")
+            .or_else(|| get_str(&codex, "auto_merge"))
             .map(|v| v.to_lowercase() == "true")
             .unwrap_or(false);
+
+        // -- agent profiles (multi-agent) --
+        let (agent_profiles, default_agent) =
+            parse_agent_profiles(root, &agent, &codex)?;
+
+        // Populate backward-compatible codex_* fields from the default profile.
+        let default_profile = agent_profiles
+            .get(&default_agent)
+            .or_else(|| agent_profiles.values().next())
+            .cloned()
+            .unwrap_or_else(default_agent_profile);
+
+        let codex_command = default_profile.command.clone();
+        let codex_approval_policy = default_profile.approval_policy.clone();
+        let codex_thread_sandbox = default_profile.thread_sandbox.clone();
+        let codex_turn_sandbox_policy = default_profile.turn_sandbox_policy.clone();
+        let codex_turn_timeout_ms = default_profile.turn_timeout_ms;
+        let codex_read_timeout_ms = default_profile.read_timeout_ms;
+        let codex_stall_timeout_ms = default_profile.stall_timeout_ms;
+        let codex_model = default_profile.model.clone();
+        let codex_reasoning_effort = default_profile.reasoning_effort.clone();
+        let codex_network_access = default_profile.network_access;
 
         // -- server --
         let server_port = get_u64(&server, "port").map(|v| v as u16);
@@ -205,6 +234,8 @@ impl ServiceConfig {
             agent_max_turns,
             agent_max_retry_backoff_ms,
             agent_max_concurrent_by_state,
+            agent_profiles,
+            default_agent,
             codex_command,
             codex_approval_policy,
             codex_thread_sandbox,
@@ -218,6 +249,111 @@ impl ServiceConfig {
             codex_auto_merge,
             server_port,
         })
+    }
+
+    /// Look up an agent profile by name.
+    pub fn get_agent_profile(&self, name: &str) -> Option<&AgentProfileConfig> {
+        self.agent_profiles.get(name)
+    }
+
+    /// Resolve which agent profile to use for a given issue.
+    ///
+    /// Checks for a label prefixed with `agent:` (e.g. `agent:claude`) and
+    /// returns the matching profile. Falls back to the configured default.
+    pub fn resolve_agent_for_issue(&self, issue: &Issue) -> &AgentProfileConfig {
+        for label in &issue.labels {
+            if let Some(agent_name) = label.strip_prefix("agent:") {
+                if let Some(profile) = self.agent_profiles.get(agent_name) {
+                    return profile;
+                }
+            }
+        }
+        self.agent_profiles
+            .get(&self.default_agent)
+            .or_else(|| self.agent_profiles.values().next())
+            .expect("at least one agent profile must be configured")
+    }
+}
+
+/// Build a default `AgentProfileConfig` with standard Codex defaults.
+fn default_agent_profile() -> AgentProfileConfig {
+    AgentProfileConfig {
+        command: "codex app-server".to_owned(),
+        approval_policy: None,
+        thread_sandbox: None,
+        turn_sandbox_policy: None,
+        turn_timeout_ms: 3_600_000,
+        read_timeout_ms: 5_000,
+        stall_timeout_ms: 300_000,
+        model: None,
+        reasoning_effort: None,
+        network_access: true,
+    }
+}
+
+/// Parse an `AgentProfileConfig` from a YAML mapping section.
+fn parse_profile_from_mapping(mapping: &Mapping) -> AgentProfileConfig {
+    AgentProfileConfig {
+        command: get_str(mapping, "command")
+            .unwrap_or_else(|| "codex app-server".to_owned()),
+        approval_policy: get_str(mapping, "approval_policy"),
+        thread_sandbox: get_str(mapping, "thread_sandbox"),
+        turn_sandbox_policy: get_str(mapping, "turn_sandbox_policy"),
+        turn_timeout_ms: get_u64(mapping, "turn_timeout_ms")
+            .unwrap_or(3_600_000),
+        read_timeout_ms: get_u64(mapping, "read_timeout_ms")
+            .unwrap_or(5_000),
+        stall_timeout_ms: get_i64(mapping, "stall_timeout_ms")
+            .unwrap_or(300_000),
+        model: get_str(mapping, "model"),
+        reasoning_effort: get_str(mapping, "reasoning_effort"),
+        network_access: get_str(mapping, "network_access")
+            .map(|v| v.to_lowercase() != "false")
+            .unwrap_or(true),
+    }
+}
+
+/// Parse the `agents:` map (new multi-agent format) or fall back to the
+/// legacy `codex:` section for backward compatibility.
+///
+/// Returns `(profiles_map, default_agent_name)`.
+fn parse_agent_profiles(
+    root: &Mapping,
+    agent: &Mapping,
+    codex: &Mapping,
+) -> Result<(HashMap<String, AgentProfileConfig>, String)> {
+    let agents_mapping = get_value(root, "agents").and_then(|v| v.as_mapping());
+
+    if let Some(agents) = agents_mapping {
+        // New format: `agents:` map with named entries.
+        let mut profiles = HashMap::new();
+        for (key, value) in agents {
+            if let Some(name) = key.as_str() {
+                let profile_map = value.as_mapping().cloned().unwrap_or_default();
+                profiles.insert(
+                    name.to_owned(),
+                    parse_profile_from_mapping(&profile_map),
+                );
+            }
+        }
+        if profiles.is_empty() {
+            profiles.insert("codex".to_owned(), default_agent_profile());
+        }
+        let default_name = get_str(agent, "default")
+            .unwrap_or_else(|| {
+                profiles
+                    .keys()
+                    .next()
+                    .cloned()
+                    .unwrap_or_else(|| "codex".to_owned())
+            });
+        Ok((profiles, default_name))
+    } else {
+        // Legacy format: single `codex:` section becomes one profile.
+        let profile = parse_profile_from_mapping(codex);
+        let mut profiles = HashMap::new();
+        profiles.insert("codex".to_owned(), profile);
+        Ok((profiles, "codex".to_owned()))
     }
 }
 
@@ -366,6 +502,9 @@ tracker:
         assert_eq!(cfg.polling_interval_ms, 30_000);
         assert_eq!(cfg.agent_max_concurrent, 10);
         assert_eq!(cfg.codex_stall_timeout_ms, 300_000);
+        // Should create a default "codex" profile.
+        assert_eq!(cfg.default_agent, "codex");
+        assert!(cfg.agent_profiles.contains_key("codex"));
     }
 
     #[test]
@@ -437,5 +576,193 @@ polling:
         );
         let cfg = ServiceConfig::from_workflow(&wf).unwrap();
         assert_eq!(cfg.polling_interval_ms, 15_000);
+    }
+
+    #[test]
+    fn from_workflow_legacy_codex_creates_single_profile() {
+        unsafe { env::set_var("TEST_API_KEY5", "key") };
+        let wf = make_workflow(
+            r#"
+tracker:
+  kind: github
+  api_key: $TEST_API_KEY5
+  project_slug: owner/repo
+codex:
+  command: codex app-server
+  model: gpt-5.3-codex
+  stall_timeout_ms: 600000
+"#,
+        );
+        let cfg = ServiceConfig::from_workflow(&wf).unwrap();
+        assert_eq!(cfg.default_agent, "codex");
+        assert_eq!(cfg.agent_profiles.len(), 1);
+
+        let profile = cfg.agent_profiles.get("codex").unwrap();
+        assert_eq!(profile.command, "codex app-server");
+        assert_eq!(profile.model.as_deref(), Some("gpt-5.3-codex"));
+        assert_eq!(profile.stall_timeout_ms, 600_000);
+
+        // Backward-compat fields should match.
+        assert_eq!(cfg.codex_command, "codex app-server");
+        assert_eq!(cfg.codex_model.as_deref(), Some("gpt-5.3-codex"));
+        assert_eq!(cfg.codex_stall_timeout_ms, 600_000);
+    }
+
+    #[test]
+    fn from_workflow_multi_agent_profiles() {
+        unsafe { env::set_var("TEST_API_KEY6", "key") };
+        let wf = make_workflow(
+            r#"
+tracker:
+  kind: github
+  api_key: $TEST_API_KEY6
+  project_slug: owner/repo
+agents:
+  codex:
+    command: codex app-server
+    model: gpt-5.3-codex
+    stall_timeout_ms: 600000
+  claude:
+    command: claude-app-server
+    model: claude-sonnet-4-6
+    reasoning_effort: high
+    network_access: false
+agent:
+  default: codex
+"#,
+        );
+        let cfg = ServiceConfig::from_workflow(&wf).unwrap();
+        assert_eq!(cfg.agent_profiles.len(), 2);
+        assert_eq!(cfg.default_agent, "codex");
+
+        let codex = cfg.agent_profiles.get("codex").unwrap();
+        assert_eq!(codex.command, "codex app-server");
+        assert_eq!(codex.model.as_deref(), Some("gpt-5.3-codex"));
+        assert_eq!(codex.stall_timeout_ms, 600_000);
+
+        let claude = cfg.agent_profiles.get("claude").unwrap();
+        assert_eq!(claude.command, "claude-app-server");
+        assert_eq!(claude.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(claude.reasoning_effort.as_deref(), Some("high"));
+        assert!(!claude.network_access);
+
+        // Backward-compat fields should come from the default profile.
+        assert_eq!(cfg.codex_command, "codex app-server");
+        assert_eq!(cfg.codex_stall_timeout_ms, 600_000);
+    }
+
+    #[test]
+    fn resolve_agent_for_issue_default() {
+        unsafe { env::set_var("TEST_API_KEY7", "key") };
+        let wf = make_workflow(
+            r#"
+tracker:
+  kind: github
+  api_key: $TEST_API_KEY7
+  project_slug: owner/repo
+agents:
+  codex:
+    command: codex app-server
+  claude:
+    command: claude-app-server
+agent:
+  default: codex
+"#,
+        );
+        let cfg = ServiceConfig::from_workflow(&wf).unwrap();
+
+        let issue = Issue {
+            id: "1".to_string(),
+            identifier: "#1".to_string(),
+            title: "Test".to_string(),
+            description: None,
+            priority: None,
+            state: "Todo".to_string(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+
+        let profile = cfg.resolve_agent_for_issue(&issue);
+        assert_eq!(profile.command, "codex app-server");
+    }
+
+    #[test]
+    fn resolve_agent_for_issue_by_label() {
+        unsafe { env::set_var("TEST_API_KEY8", "key") };
+        let wf = make_workflow(
+            r#"
+tracker:
+  kind: github
+  api_key: $TEST_API_KEY8
+  project_slug: owner/repo
+agents:
+  codex:
+    command: codex app-server
+  claude:
+    command: claude-app-server
+agent:
+  default: codex
+"#,
+        );
+        let cfg = ServiceConfig::from_workflow(&wf).unwrap();
+
+        let issue = Issue {
+            id: "2".to_string(),
+            identifier: "#2".to_string(),
+            title: "Test".to_string(),
+            description: None,
+            priority: None,
+            state: "Todo".to_string(),
+            branch_name: None,
+            url: None,
+            labels: vec!["agent:claude".to_string()],
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+
+        let profile = cfg.resolve_agent_for_issue(&issue);
+        assert_eq!(profile.command, "claude-app-server");
+    }
+
+    #[test]
+    fn resolve_agent_for_issue_unknown_label_falls_back() {
+        unsafe { env::set_var("TEST_API_KEY9", "key") };
+        let wf = make_workflow(
+            r#"
+tracker:
+  kind: github
+  api_key: $TEST_API_KEY9
+  project_slug: owner/repo
+agents:
+  codex:
+    command: codex app-server
+agent:
+  default: codex
+"#,
+        );
+        let cfg = ServiceConfig::from_workflow(&wf).unwrap();
+
+        let issue = Issue {
+            id: "3".to_string(),
+            identifier: "#3".to_string(),
+            title: "Test".to_string(),
+            description: None,
+            priority: None,
+            state: "Todo".to_string(),
+            branch_name: None,
+            url: None,
+            labels: vec!["agent:nonexistent".to_string()],
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+
+        let profile = cfg.resolve_agent_for_issue(&issue);
+        assert_eq!(profile.command, "codex app-server");
     }
 }

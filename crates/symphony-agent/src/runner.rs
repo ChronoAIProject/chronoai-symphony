@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use serde_json::Value;
-use symphony_core::domain::{Issue, ServiceConfig};
+use symphony_core::domain::{AgentProfileConfig, Issue};
 use symphony_core::error::SymphonyError;
 use tokio::sync::mpsc;
 use tracing::{error, info};
@@ -40,23 +40,30 @@ pub enum WorkerExitReason {
 }
 
 /// Manages the agent lifecycle: process launch, handshake, and turn execution.
+///
+/// Each `AgentRunner` is configured with a single `AgentProfileConfig`
+/// describing the specific agent backend to use (command, model, timeouts,
+/// sandbox policy, etc.). The orchestrator creates one runner per issue,
+/// selecting the appropriate profile based on issue labels.
 pub struct AgentRunner {
-    config: ServiceConfig,
+    profile: AgentProfileConfig,
 }
 
 impl AgentRunner {
-    pub fn new(config: ServiceConfig) -> Self {
-        Self { config }
+    /// Create a runner from an `AgentProfileConfig`.
+    pub fn new(profile: AgentProfileConfig) -> Self {
+        Self { profile }
     }
 
-    pub fn config(&self) -> &ServiceConfig {
-        &self.config
+    /// Return a reference to the underlying profile.
+    pub fn profile(&self) -> &AgentProfileConfig {
+        &self.profile
     }
 
     /// Resolve the approval policy as a JSON Value.
     /// Uses config override if present, otherwise uses OpenAI's default.
     fn resolve_approval_policy(&self) -> Value {
-        match &self.config.codex_approval_policy {
+        match &self.profile.approval_policy {
             Some(s) => {
                 // Try parsing as JSON first (could be a map like {"reject": {...}}).
                 serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.clone()))
@@ -66,14 +73,14 @@ impl AgentRunner {
     }
 
     fn resolve_thread_sandbox(&self) -> Value {
-        match &self.config.codex_thread_sandbox {
+        match &self.profile.thread_sandbox {
             Some(s) => serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.clone())),
             None => default_thread_sandbox(),
         }
     }
 
     fn resolve_turn_sandbox_policy(&self, workspace_path: &str) -> Value {
-        let mut policy = match &self.config.codex_turn_sandbox_policy {
+        let mut policy = match &self.profile.turn_sandbox_policy {
             Some(s) => serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.clone())),
             None => default_turn_sandbox_policy(workspace_path),
         };
@@ -81,7 +88,7 @@ impl AgentRunner {
         if let Some(obj) = policy.as_object_mut() {
             obj.insert(
                 "networkAccess".to_string(),
-                Value::Bool(self.config.codex_network_access),
+                Value::Bool(self.profile.network_access),
             );
         }
         policy
@@ -90,10 +97,10 @@ impl AgentRunner {
     /// Build the agent command with optional model and reasoning effort flags.
     fn build_command(&self, base_command: &str) -> String {
         let mut cmd = base_command.to_string();
-        if let Some(ref model) = self.config.codex_model {
+        if let Some(ref model) = self.profile.model {
             cmd = format!("{cmd} --model {model}");
         }
-        if let Some(ref effort) = self.config.codex_reasoning_effort {
+        if let Some(ref effort) = self.profile.reasoning_effort {
             cmd = format!("{cmd} --config model_reasoning_effort={effort}");
         }
         cmd
@@ -108,7 +115,7 @@ impl AgentRunner {
         event_tx: &mpsc::Sender<AgentEvent>,
     ) -> Result<AgentSession, SymphonyError> {
         // Build the command with optional model and reasoning effort flags.
-        let base_command = &self.config.codex_command;
+        let base_command = &self.profile.command;
         let command = self.build_command(base_command);
         let cwd = workspace_path.to_string_lossy().to_string();
 
@@ -248,9 +255,9 @@ impl AgentRunner {
 
     fn build_timeout_config(&self) -> TimeoutConfig {
         TimeoutConfig::new(
-            self.config.codex_read_timeout_ms,
-            self.config.codex_turn_timeout_ms,
-            self.config.codex_stall_timeout_ms,
+            self.profile.read_timeout_ms,
+            self.profile.turn_timeout_ms,
+            self.profile.stall_timeout_ms,
         )
     }
 }

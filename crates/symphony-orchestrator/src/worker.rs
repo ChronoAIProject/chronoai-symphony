@@ -20,6 +20,9 @@ use tracing::{error, info, warn};
 use crate::approval_queue::{PendingApprovalQueue, QueuedApprovalHandler};
 use crate::events::WorkerExitReason;
 
+// Re-export so the orchestrator can still import from this module.
+pub use symphony_agent::runner::AgentRunner as AgentRunnerType;
+
 /// Default continuation prompt for subsequent turns.
 const DEFAULT_CONTINUATION_PROMPT: &str =
     "Continue working on the issue. Review your previous changes and verify correctness.";
@@ -48,7 +51,6 @@ pub async fn run_worker(
     attempt: Option<u32>,
     config: ServiceConfig,
     prompt_template: String,
-    agent_runner: Arc<AgentRunner>,
     tracker: Arc<dyn IssueTracker>,
     workspace_manager: Arc<WorkspaceManager>,
     event_tx: mpsc::Sender<(String, AgentEvent)>,
@@ -58,6 +60,10 @@ pub async fn run_worker(
     let issue_id = issue.id.clone();
     let identifier = issue.identifier.clone();
     let max_turns = config.agent_max_turns;
+
+    // Resolve which agent profile to use for this issue.
+    let profile = config.resolve_agent_for_issue(&issue).clone();
+    let agent_runner = AgentRunner::new(profile);
 
     info!(
         issue_id = %issue_id,

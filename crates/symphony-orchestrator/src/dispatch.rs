@@ -171,7 +171,7 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
     use std::collections::{HashMap, HashSet};
-    use symphony_core::domain::{BlockerRef, CodexTotals, HooksConfig, RunningEntry};
+    use symphony_core::domain::{AgentProfileConfig, BlockerRef, CodexTotals, HooksConfig, RunningEntry};
 
     fn empty_state() -> OrchestratorState {
         OrchestratorState {
@@ -187,6 +187,21 @@ mod tests {
     }
 
     fn default_config() -> ServiceConfig {
+        let default_profile = AgentProfileConfig {
+            command: "codex app-server".to_string(),
+            approval_policy: None,
+            thread_sandbox: None,
+            turn_sandbox_policy: None,
+            turn_timeout_ms: 3_600_000,
+            read_timeout_ms: 5_000,
+            stall_timeout_ms: 300_000,
+            model: None,
+            reasoning_effort: None,
+            network_access: true,
+        };
+        let mut agent_profiles = HashMap::new();
+        agent_profiles.insert("codex".to_string(), default_profile);
+
         ServiceConfig {
             tracker_kind: "github".to_string(),
             tracker_endpoint: "https://api.github.com".to_string(),
@@ -207,6 +222,8 @@ mod tests {
             agent_max_turns: 20,
             agent_max_retry_backoff_ms: 300_000,
             agent_max_concurrent_by_state: HashMap::new(),
+            agent_profiles,
+            default_agent: "codex".to_string(),
             codex_command: "codex app-server".to_string(),
             codex_approval_policy: None,
             codex_thread_sandbox: None,

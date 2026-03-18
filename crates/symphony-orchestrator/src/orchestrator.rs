@@ -11,7 +11,6 @@ use std::time::Duration;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use symphony_agent::protocol::events::AgentEvent;
-use symphony_agent::runner::AgentRunner;
 use symphony_core::domain::{
     CodexTotals, Issue, OrchestratorState, RunningEntry, ServiceConfig,
 };
@@ -63,7 +62,6 @@ pub struct Orchestrator {
     prompt_template: String,
     tracker: Arc<dyn IssueTracker>,
     workspace_manager: Arc<WorkspaceManager>,
-    agent_runner: Arc<AgentRunner>,
     event_rx: mpsc::Receiver<OrchestratorEvent>,
     event_tx: mpsc::Sender<OrchestratorEvent>,
     shared_snapshot: SharedSnapshot,
@@ -79,7 +77,6 @@ impl Orchestrator {
         prompt_template: String,
         tracker: Arc<dyn IssueTracker>,
         workspace_manager: Arc<WorkspaceManager>,
-        agent_runner: Arc<AgentRunner>,
     ) -> Self {
         let state = OrchestratorState {
             poll_interval_ms: config.polling_interval_ms,
@@ -111,7 +108,6 @@ impl Orchestrator {
             prompt_template,
             tracker,
             workspace_manager,
-            agent_runner,
             event_rx,
             event_tx,
             shared_snapshot,
@@ -424,7 +420,6 @@ impl Orchestrator {
         // Spawn worker task.
         let config = self.config.clone();
         let prompt_template = self.prompt_template.clone();
-        let agent_runner = Arc::clone(&self.agent_runner);
         let tracker = Arc::clone(&self.tracker);
         let wm = Arc::clone(&self.workspace_manager);
         let event_tx = worker_event_tx.clone();
@@ -437,7 +432,6 @@ impl Orchestrator {
                 attempt,
                 config,
                 prompt_template,
-                agent_runner,
                 tracker,
                 wm,
                 event_tx,
@@ -860,7 +854,7 @@ mod tests {
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::path::PathBuf;
-    use symphony_core::domain::{HooksConfig, Issue};
+    use symphony_core::domain::{AgentProfileConfig, HooksConfig, Issue};
     use symphony_core::error::SymphonyError;
 
     struct NoopTracker;
@@ -887,6 +881,21 @@ mod tests {
     }
 
     fn test_config() -> ServiceConfig {
+        let default_profile = AgentProfileConfig {
+            command: "codex app-server".to_string(),
+            approval_policy: None,
+            thread_sandbox: None,
+            turn_sandbox_policy: None,
+            turn_timeout_ms: 3_600_000,
+            read_timeout_ms: 5_000,
+            stall_timeout_ms: 300_000,
+            model: None,
+            reasoning_effort: None,
+            network_access: true,
+        };
+        let mut agent_profiles = HashMap::new();
+        agent_profiles.insert("codex".to_string(), default_profile);
+
         ServiceConfig {
             tracker_kind: "github".to_string(),
             tracker_endpoint: "https://api.github.com".to_string(),
@@ -907,6 +916,8 @@ mod tests {
             agent_max_turns: 10,
             agent_max_retry_backoff_ms: 300_000,
             agent_max_concurrent_by_state: HashMap::new(),
+            agent_profiles,
+            default_agent: "codex".to_string(),
             codex_command: "codex app-server".to_string(),
             codex_approval_policy: None,
             codex_thread_sandbox: None,
@@ -938,14 +949,12 @@ mod tests {
             None,
             5000,
         );
-        let ar = AgentRunner::new(test_config());
 
         let orch = Orchestrator::new(
             config,
             "prompt".to_string(),
             tracker,
             Arc::new(wm),
-            Arc::new(ar),
         );
 
         let snap = orch.get_snapshot();
@@ -967,14 +976,12 @@ mod tests {
             None,
             5000,
         );
-        let ar = AgentRunner::new(test_config());
 
         let orch = Orchestrator::new(
             config,
             "prompt".to_string(),
             tracker,
             Arc::new(wm),
-            Arc::new(ar),
         );
 
         let _tx1 = orch.event_sender();

@@ -191,25 +191,39 @@ hooks:
   timeout_ms: 300000                    # Hook timeout. Default: 60s.
 
 agent:
+  default: codex                       # Which agent profile to use by default.
   max_concurrent_agents: 10            # Global concurrency limit. Default: 10.
   max_turns: 20                         # Max turns per agent session. Default: 20.
   max_retry_backoff_ms: 300000         # Max retry delay. Default: 5 minutes.
+  auto_merge: false                    # Auto-merge after approval. Default: false.
   max_concurrent_agents_by_state:      # Optional per-state concurrency limits.
     in progress: 5
     todo: 3
 
-codex:
-  command: codex app-server            # Agent command. Or: claude-app-server
-  approval_policy: never               # Auto-approve. Valid: untrusted,
-                                        # on-failure, on-request, granular, never.
-  thread_sandbox: workspace-write      # Sandbox mode. Default: workspace-write.
-  model: gpt-5.3-codex                 # Optional. Passed as --model to agent.
-  reasoning_effort: xhigh              # Optional. low, medium, high, xhigh.
-  network_access: true                 # Allow network in sandbox. Default: true.
-  auto_merge: false                    # Auto-merge after approval. Default: false.
-  turn_timeout_ms: 3600000             # Turn timeout. Default: 1 hour.
-  read_timeout_ms: 5000                # Startup handshake timeout. Default: 5s.
-  stall_timeout_ms: 300000             # Inactivity timeout. Default: 5 min. <=0 disables.
+# Named agent profiles. Add `agent:<name>` label to an issue to override.
+agents:
+  codex:
+    command: codex app-server          # Launch command.
+    approval_policy: never             # never, on-request, granular, etc.
+    thread_sandbox: workspace-write
+    model: gpt-5.3-codex              # Optional. Passed as --model.
+    reasoning_effort: xhigh            # Optional. low, medium, high, xhigh.
+    network_access: true               # Sandbox network access. Default: true.
+    turn_timeout_ms: 3600000           # Turn timeout. Default: 1 hour.
+    read_timeout_ms: 5000              # Handshake timeout. Default: 5s.
+    stall_timeout_ms: 300000           # Inactivity timeout. Default: 5 min.
+  claude:
+    command: claude-app-server
+    model: claude-sonnet-4-6
+    reasoning_effort: high
+    approval_policy: never
+    network_access: true
+    turn_timeout_ms: 3600000
+
+# Legacy single-agent format (still supported):
+# codex:
+#   command: codex app-server
+#   model: gpt-5.3-codex
 
 server:
   port: 8080                            # Enable HTTP dashboard on this port.
@@ -467,16 +481,26 @@ Symphony works with any coding agent that implements the Codex app-server JSON-R
 | [OpenAI Codex](https://github.com/openai/codex) | `codex app-server` | Default. The reference implementation. |
 | [Claude Code](https://github.com/sumansid/claude-app-server) | `claude-app-server` | Drop-in replacement using Claude. |
 
-Change the `codex.command` field to switch agents:
+### Multi-agent setup
+
+Define multiple agents in `WORKFLOW.md` and assign them per-issue via GitHub labels:
 
 ```yaml
-codex:
-  command: claude-app-server           # Use Claude instead of Codex
-  model: claude-sonnet-4-6             # Claude model
-  reasoning_effort: high
+agents:
+  codex:
+    command: codex app-server
+    model: gpt-5.3-codex
+  claude:
+    command: claude-app-server
+    model: claude-sonnet-4-6
+
+agent:
+  default: codex    # Issues without a label use Codex
 ```
 
-Both agents use the same protocol, so switching is just a config change. You can even run different agents for different repos by using different WORKFLOW.md files.
+To use Claude for a specific issue, add the label `agent:claude` to the GitHub issue. Symphony will automatically use the matching agent profile. Issues without an `agent:` label use the configured default.
+
+Both agents can run in parallel on different issues simultaneously.
 
 ## Authentication
 

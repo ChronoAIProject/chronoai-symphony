@@ -90,6 +90,8 @@ fn validate_tracker_project_slug(config: &ServiceConfig) -> Result<(), SymphonyE
 }
 
 fn validate_codex_command(config: &ServiceConfig) -> Result<(), SymphonyError> {
+    // Check that the default agent profile has a non-empty command.
+    // Also check the legacy codex_command for backward compatibility.
     if config.codex_command.trim().is_empty() {
         return Err(SymphonyError::ConfigValidation {
             detail: "codex_command is required and must not be empty".to_string(),
@@ -103,9 +105,24 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::path::PathBuf;
-    use symphony_core::domain::config::HooksConfig;
+    use symphony_core::domain::config::{AgentProfileConfig, HooksConfig};
 
     fn valid_config() -> ServiceConfig {
+        let default_profile = AgentProfileConfig {
+            command: "codex".to_string(),
+            approval_policy: None,
+            thread_sandbox: None,
+            turn_sandbox_policy: None,
+            turn_timeout_ms: 3_600_000,
+            read_timeout_ms: 5_000,
+            stall_timeout_ms: 300_000,
+            model: None,
+            reasoning_effort: None,
+            network_access: true,
+        };
+        let mut agent_profiles = HashMap::new();
+        agent_profiles.insert("codex".to_string(), default_profile);
+
         ServiceConfig {
             tracker_kind: "github".to_string(),
             tracker_endpoint: "https://api.github.com".to_string(),
@@ -126,6 +143,8 @@ mod tests {
             agent_max_turns: 20,
             agent_max_retry_backoff_ms: 300_000,
             agent_max_concurrent_by_state: HashMap::new(),
+            agent_profiles,
+            default_agent: "codex".to_string(),
             codex_command: "codex".to_string(),
             codex_approval_policy: None,
             codex_thread_sandbox: None,
