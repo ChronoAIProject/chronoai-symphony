@@ -237,6 +237,46 @@ function stateBadge(st){
   return"state-badge";
 }
 function esc(s){if(!s)return"";let d=document.createElement("div");d.textContent=s;return d.innerHTML;}
+function fmtRateLimits(rl){
+  if(!rl||typeof rl!=="object")return"<p class=\"empty-state\">n/a</p>";
+  // Handle Claude-style rate_limit_info
+  let status=rl.status||rl.rateLimitType||"";
+  let resets=rl.resetsAt?new Date(rl.resetsAt*1000).toLocaleTimeString():null;
+  let overageResets=rl.overageResetsAt?new Date(rl.overageResetsAt*1000).toLocaleTimeString():null;
+  // Handle Codex-style rate limits (may have primary/secondary fields)
+  let remaining=rl.remaining!=null?rl.remaining:null;
+  let limit=rl.limit!=null?rl.limit:null;
+  let reset=rl.reset!=null?rl.reset+"s":null;
+  let html='<div class="metric-grid" style="margin-top:1rem">';
+  if(status){
+    let badgeClass=status==="allowed"?"state-badge state-badge-active":"state-badge state-badge-danger";
+    html+=`<article class="metric-card"><p class="metric-label">Status</p><p class="metric-value"><span class="${badgeClass}">${esc(status)}</span></p></article>`;
+  }
+  if(rl.rateLimitType){
+    html+=`<article class="metric-card"><p class="metric-label">Type</p><p class="metric-value">${esc(rl.rateLimitType)}</p></article>`;
+  }
+  if(resets){
+    html+=`<article class="metric-card"><p class="metric-label">Resets at</p><p class="metric-value">${resets}</p></article>`;
+  }
+  if(remaining!=null&&limit!=null){
+    let pct=Math.round((remaining/limit)*100);
+    let color=pct>50?"var(--accent)":pct>20?"var(--warning-ink)":"var(--danger)";
+    html+=`<article class="metric-card"><p class="metric-label">Remaining</p><p class="metric-value" style="color:${color}">${fmt(remaining)} / ${fmt(limit)}</p>`;
+    if(reset)html+=`<p class="metric-detail">Resets in ${reset}</p>`;
+    html+=`</article>`;
+  }
+  if(rl.overageStatus){
+    html+=`<article class="metric-card"><p class="metric-label">Overage</p><p class="metric-value">${esc(rl.overageStatus)}</p>`;
+    if(overageResets)html+=`<p class="metric-detail">Resets at ${overageResets}</p>`;
+    html+=`</article>`;
+  }
+  html+="</div>";
+  // If none of the known fields matched, fall back to formatted JSON
+  if(!status&&remaining==null&&!rl.rateLimitType){
+    html=`<pre class="code-panel">${JSON.stringify(rl,null,2)}</pre>`;
+  }
+  return html;
+}
 function copyText(text,btn){
   function done(){btn.textContent="Copied";setTimeout(()=>btn.textContent="Copy ID",1200);}
   function fallback(){
@@ -331,7 +371,7 @@ function render(data){
         <p class="section-copy">Latest upstream rate-limit snapshot, when available.</p>
       </div>
     </div>
-    <pre class="code-panel">${rl?JSON.stringify(rl,null,2):"n/a"}</pre>
+    ${rl?fmtRateLimits(rl):"<p class=\"empty-state\">No rate limit data available.</p>"}
   </section>
 
   <section class="section-card">

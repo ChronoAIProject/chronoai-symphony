@@ -176,6 +176,17 @@ async fn stream_claude_inner(
                     .await;
             }
 
+            "rate_limit_event" => {
+                if let Some(info) = parsed.get("rate_limit_info") {
+                    let _ = event_tx
+                        .send(AgentEvent::RateLimitUpdate {
+                            rate_limits: info.clone(),
+                            timestamp: Utc::now(),
+                        })
+                        .await;
+                }
+            }
+
             "result" => {
                 got_result = true;
                 let is_error = parsed
@@ -198,6 +209,19 @@ async fn stream_claude_inner(
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
+
+                // Extract cost and duration for logging.
+                let cost = parsed.get("total_cost_usd").and_then(|v| v.as_f64());
+                let duration_ms = parsed.get("duration_ms").and_then(|v| v.as_u64());
+                let num_turns = parsed.get("num_turns").and_then(|v| v.as_u64());
+                if let Some(c) = cost {
+                    info!(
+                        cost_usd = c,
+                        duration_ms = ?duration_ms,
+                        num_turns = ?num_turns,
+                        "Claude CLI session completed"
+                    );
+                }
 
                 if is_error {
                     let error_msg = if result_text.is_empty() {
