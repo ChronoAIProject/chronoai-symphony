@@ -41,90 +41,20 @@ export GITHUB_TOKEN=ghp_your_token_here
 
 ### 2. Create a WORKFLOW.md in your project
 
-```markdown
----
-tracker:
-  kind: github
-  api_key: $GITHUB_TOKEN
-  project_slug: your-org/your-repo
-  active_states:
-    - Todo
-    - In Progress
-    - Human Review
-    - Rework
-  terminal_states:
-    - Done
-    - Closed
-    - Cancelled
+Copy the included [WORKFLOW.md](WORKFLOW.md) to your project root and edit it:
 
-polling:
-  interval_ms: 30000
-
-workspace:
-  root: /tmp/symphony_workspaces
-
-hooks:
-  after_create: |
-    git clone --depth 1 https://github.com/your-org/your-repo.git .
-  before_run: |
-    git fetch origin
-    git checkout main && git pull
-    BRANCH="symphony/issue-${SYMPHONY_ISSUE_NUMBER}"
-    git checkout -B "$BRANCH" origin/main
-  timeout_ms: 300000
-
-agent:
-  max_concurrent_agents: 5
-  max_turns: 20
-
-codex:
-  command: codex app-server
-  approval_policy: never
-  thread_sandbox: workspace-write
-  turn_timeout_ms: 3600000
-  stall_timeout_ms: 300000
-
-server:
-  port: 8080
----
-
-You are a coding agent working on issue {{ issue.identifier }}: {{ issue.title }}.
-
-{{ issue.description }}
-
-{% if attempt %}
-Continuation attempt {{ attempt }}. Resume from current workspace state.
-{% endif %}
-
-## Status Map
-
-- **Todo** -> Move to `in-progress`, start work.
-- **In Progress** -> Continue implementation.
-- **Human Review** -> Do not code. Wait for review.
-- **Rework** -> Read PR review comments, address feedback, push fixes, return to `human-review`.
-- **Done** -> Shut down.
-
-## Git Workflow
-
-1. You are on branch `symphony/issue-{{ issue.identifier | remove: "#" }}`.
-2. Commit with conventional messages.
-3. Push and create a PR with `Closes {{ issue.identifier }}`.
-
-## PR Feedback Sweep (before moving to human-review)
-
-1. Read all PR comments: `gh pr view --comments`
-2. Read inline reviews: `gh api repos/{owner}/{repo}/pulls/{number}/comments`
-3. Address each comment: fix code or reply with justification.
-4. Re-run tests, push, repeat until no outstanding comments.
-
-## Instructions
-
-1. Read the issue carefully.
-2. Implement changes and write tests.
-3. Push and create a pull request.
-4. Complete PR feedback sweep.
-5. Add label `human-review` to the issue.
+```bash
+# From the chronoai-symphony repo
+cp WORKFLOW.md /path/to/your/project/WORKFLOW.md
 ```
+
+Then update these fields:
+- `tracker.project_slug` - your `owner/repo`
+- `hooks.after_create` - your git clone URL and build steps
+- `hooks.before_run` - your dependency install commands
+- The prompt body - your project's tech stack, architecture rules, and instructions
+
+See the [full config reference](#full-workflowmd-reference) below for all available settings.
 
 ### 3. Install and run Symphony
 
