@@ -9,6 +9,7 @@ tracker:
   active_states:
     - Todo
     - In Progress
+    - Code Review
     - Human Review
     - Rework
   terminal_states:
@@ -42,8 +43,10 @@ agent:
   max_turns: 20
   max_retry_backoff_ms: 300000
   auto_merge: false                     # Auto-merge PR after approval (default: false).
-  # require_label: symphony             # Only dispatch issues with this label. Prevents
-                                        # public users from triggering agent runs.
+  # require_label: symphony             # Only dispatch issues with this label.
+  # by_state:                           # Override agent per state (implement + review pipeline).
+  #   code-review: claude               # Claude reviews after Codex implements.
+  #   rework: codex                     # Codex fixes after review feedback.
 
 # Multiple named agents. Add `agent:claude` label to an issue to use Claude.
 agents:
@@ -96,16 +99,22 @@ You are a coding agent working on issue {{ issue.identifier }}: {{ issue.title }
 |-------|---------|
 | `todo` | Queued. Move to `in-progress` before starting. |
 | `in-progress` | Implementation underway. |
-| `human-review` | PR attached. Waiting on human approval. |
+| `code-review` | PR created. Automated review in progress (by review agent). |
+| `human-review` | Automated review passed. Waiting on human approval. |
 | `rework` | Reviewer requested changes. Address feedback. |
 | `done` | Terminal. No further action. |
 
 ## Step 0: Route by Current State
 
 - **Todo** -> Add label `in-progress`, remove `todo`, then start execution.
-- **In Progress** -> Continue execution from current workspace state.
+- **In Progress** -> Implement the changes. When done, add label `code-review` (for automated review) or `human-review` (skip to human).
+- **Code Review** -> You are the **review agent**. Review the PR for this issue:
+  1. Read all changed files: `gh pr diff`
+  2. Check code quality, tests, security, and architecture
+  3. If changes look good: add label `human-review`, remove `code-review`
+  4. If changes need work: post review comments on the PR, add label `rework`, remove `code-review`
 - **Human Review** -> Do not code. Poll for review updates.
-- **Rework** -> Read all PR review comments, address feedback, push fixes, then move back to `human-review`.
+- **Rework** -> Read all PR review comments, address feedback, push fixes, then move back to `code-review` or `human-review`.
 - **Done / Closed** -> Do nothing, shut down.
 
 ## Git Workflow

@@ -146,6 +146,7 @@ mod tests {
             agent_max_retry_backoff_ms: 300_000,
             agent_max_concurrent_by_state: HashMap::new(),
             agent_require_label: None,
+            agent_by_state: HashMap::new(),
             agent_profiles,
             default_agent: "codex".to_string(),
             codex_command: "codex".to_string(),

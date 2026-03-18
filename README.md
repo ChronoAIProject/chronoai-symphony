@@ -505,6 +505,36 @@ agent:
 
 To use Claude for a specific issue, add the label `agent:claude` to the GitHub issue. Both agents can run in parallel on different issues simultaneously.
 
+### Implement + Review pipeline
+
+Use different agents for different workflow phases. Codex implements, Claude reviews:
+
+```yaml
+agents:
+  codex:
+    command: codex app-server
+    model: gpt-5.3-codex
+  claude:
+    agent_type: claude-cli
+    command: claude
+    model: claude-sonnet-4-6
+
+agent:
+  default: codex
+  by_state:
+    code-review: claude       # Claude reviews after Codex implements
+    rework: codex             # Codex fixes after review feedback
+```
+
+Flow:
+```
+Todo → In Progress (Codex) → Code Review (Claude) → Human Review → Done
+                                    ↑                       |
+                                    └── Rework (Codex) ←────┘
+```
+
+The implementation agent moves the issue to `code-review` when done. Symphony automatically switches to the Claude agent for review. Claude reviews the PR and either approves (→ `human-review`) or requests changes (→ `rework`), where Codex picks it up again.
+
 **Key differences between agent types:**
 
 | | Codex (`codex`) | Claude Code (`claude-cli`) |

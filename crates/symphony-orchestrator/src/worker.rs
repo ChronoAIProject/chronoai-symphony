@@ -381,6 +381,7 @@ async fn run_codex_worker(
 
                         let handoff_states = [
                             "human review", "human-review", "humanreview",
+                            "code review", "code-review", "codereview",
                             "merging", "blocked",
                         ];
                         let is_handoff = handoff_states

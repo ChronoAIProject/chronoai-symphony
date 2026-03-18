@@ -108,6 +108,10 @@ pub struct ServiceConfig {
     // -- agent profiles (multi-agent support) --
     pub agent_profiles: HashMap<String, AgentProfileConfig>,
     pub default_agent: String,
+    /// Maps issue states to agent profiles. When an issue is in a specific
+    /// state, the mapped agent is used instead of the default or label-based
+    /// selection. Example: `{"code-review": "claude", "rework": "codex"}`.
+    pub agent_by_state: HashMap<String, String>,
 
     // -- codex (backward-compatible fields, populated from default profile) --
     pub codex_command: String,
@@ -229,6 +233,20 @@ impl ServiceConfig {
         let (agent_profiles, default_agent) =
             parse_agent_profiles(root, &agent, &codex)?;
 
+        // Parse agent_by_state: maps state names to agent profile names.
+        let agent_by_state = get_value(&agent, "by_state")
+            .and_then(|v| v.as_mapping())
+            .map(|m| {
+                let mut map = HashMap::new();
+                for (k, v) in m {
+                    if let (Some(state), Some(agent_name)) = (k.as_str(), v.as_str()) {
+                        map.insert(state.to_lowercase(), agent_name.to_owned());
+                    }
+                }
+                map
+            })
+            .unwrap_or_default();
+
         // Populate backward-compatible codex_* fields from the default profile.
         let default_profile = agent_profiles
             .get(&default_agent)
@@ -270,6 +288,7 @@ impl ServiceConfig {
             agent_require_label,
             agent_profiles,
             default_agent,
+            agent_by_state,
             codex_command,
             codex_approval_policy,
             codex_thread_sandbox,
@@ -292,9 +311,24 @@ impl ServiceConfig {
 
     /// Resolve which agent profile to use for a given issue.
     ///
-    /// Checks for a label prefixed with `agent:` (e.g. `agent:claude`) and
-    /// returns the matching profile. Falls back to the configured default.
+    /// Priority order:
+    /// 1. `agent_by_state` mapping (e.g., code-review -> claude)
+    /// 2. Issue label prefixed with `agent:` (e.g., `agent:claude`)
+    /// 3. Configured default agent
     pub fn resolve_agent_for_issue(&self, issue: &Issue) -> &AgentProfileConfig {
+        // 1. Check state-based agent mapping.
+        let normalized_state = issue.state.to_lowercase().replace('-', " ");
+        for (state_key, agent_name) in &self.agent_by_state {
+            if *state_key == normalized_state
+                || *state_key == issue.state.to_lowercase()
+            {
+                if let Some(profile) = self.agent_profiles.get(agent_name) {
+                    return profile;
+                }
+            }
+        }
+
+        // 2. Check issue labels.
         for label in &issue.labels {
             if let Some(agent_name) = label.strip_prefix("agent:") {
                 if let Some(profile) = self.agent_profiles.get(agent_name) {
