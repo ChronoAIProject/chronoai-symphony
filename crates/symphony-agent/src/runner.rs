@@ -126,10 +126,9 @@ impl AgentRunner {
             vars.push(("SYMPHONY_REASONING_EFFORT".to_string(), effort.clone()));
         }
 
-        // If using GitHub App auth, pass the token file path so the
-        // agent can re-read fresh tokens. We also pass a fresh token
-        // for the initial launch, but for long-running sessions the
-        // agent should use the token file.
+        // Always pass GH_TOKEN to the agent subprocess so `gh` uses the
+        // Symphony-configured token instead of the user's personal keyring.
+        // Priority: token file (GitHub App, refreshed) > env var (PAT, static).
         if let Ok(token_file) = std::env::var("SYMPHONY_TOKEN_FILE") {
             vars.push(("SYMPHONY_TOKEN_FILE".to_string(), token_file.clone()));
             if let Ok(fresh_token) = std::fs::read_to_string(&token_file) {
@@ -138,6 +137,13 @@ impl AgentRunner {
                     vars.push(("GH_TOKEN".to_string(), token.clone()));
                     vars.push(("GITHUB_TOKEN".to_string(), token));
                 }
+            }
+        } else if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+            // PAT auth: pass the token explicitly so gh uses it
+            // instead of the user's personal keyring credentials.
+            if !token.is_empty() {
+                vars.push(("GH_TOKEN".to_string(), token.clone()));
+                vars.push(("GITHUB_TOKEN".to_string(), token));
             }
         }
 
