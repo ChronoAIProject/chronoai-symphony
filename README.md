@@ -206,19 +206,19 @@ agents:
     command: codex app-server          # Launch command.
     approval_policy: never             # never, on-request, granular, etc.
     thread_sandbox: workspace-write
-    model: gpt-5.3-codex              # Optional. Passed as --model.
-    reasoning_effort: xhigh            # Optional. low, medium, high, xhigh.
+    model: gpt-5.3-codex              # Codex-specific. Passed as --model flag.
+    reasoning_effort: xhigh            # Codex-specific. Passed as --config flag.
     network_access: true               # Sandbox network access. Default: true.
     turn_timeout_ms: 3600000           # Turn timeout. Default: 1 hour.
     read_timeout_ms: 5000              # Handshake timeout. Default: 5s.
     stall_timeout_ms: 300000           # Inactivity timeout. Default: 5 min.
   claude:
-    command: claude-app-server
-    model: claude-sonnet-4-6
-    reasoning_effort: high
-    approval_policy: never
+    command: claude-app-server         # Community wrapper for Claude Code.
+    approval_policy: never             # Same protocol, same approval values.
     network_access: true
     turn_timeout_ms: 3600000
+    # model/reasoning_effort are Codex CLI flags; claude-app-server
+    # uses its own configuration (see its README).
 
 # Legacy single-agent format (still supported):
 # codex:
@@ -474,12 +474,14 @@ Options:
 
 ## Supported Agents
 
-Symphony works with any coding agent that implements the Codex app-server JSON-RPC protocol:
+Symphony works with any coding agent that implements the Codex app-server JSON-RPC protocol over stdio:
 
-| Agent | Command | Notes |
-|-------|---------|-------|
-| [OpenAI Codex](https://github.com/openai/codex) | `codex app-server` | Default. The reference implementation. |
-| [Claude Code](https://github.com/sumansid/claude-app-server) | `claude-app-server` | Drop-in replacement using Claude. |
+| Agent | Command | Install | Notes |
+|-------|---------|---------|-------|
+| [OpenAI Codex](https://github.com/openai/codex) | `codex app-server` | `npm i -g @openai/codex` | The reference implementation. `model` and `reasoning_effort` are passed as CLI flags. |
+| [claude-app-server](https://github.com/sumansid/claude-app-server) | `claude-app-server` | `npm i -g claude-app-server` | Third-party wrapper that bridges Claude Code to the Codex JSON-RPC protocol. Has its own config for model selection. |
+
+> **Note:** `claude-app-server` is a community wrapper around Claude Code, not the official Claude CLI. It translates the Codex app-server protocol so Symphony can orchestrate Claude Code sessions. Check its README for configuration options (model, API key, etc.).
 
 ### Multi-agent setup
 
@@ -489,10 +491,12 @@ Define multiple agents in `WORKFLOW.md` and assign them per-issue via GitHub lab
 agents:
   codex:
     command: codex app-server
-    model: gpt-5.3-codex
+    model: gpt-5.3-codex             # Codex-specific: passed as --model flag
+    reasoning_effort: xhigh           # Codex-specific: passed as --config flag
   claude:
-    command: claude-app-server
-    model: claude-sonnet-4-6
+    command: claude-app-server        # Uses its own config for model selection
+    # model and reasoning_effort flags are Codex-specific;
+    # claude-app-server uses its own configuration.
 
 agent:
   default: codex    # Issues without a label use Codex

@@ -55,16 +55,11 @@ agents:
     turn_timeout_ms: 3600000
     read_timeout_ms: 5000
     stall_timeout_ms: 600000
-  # claude:
-  #   command: claude-app-server
+  # claude:                              # Uncomment to enable. Add `agent:claude` label to issues.
+  #   command: claude-app-server         # npm i -g claude-app-server
   #   approval_policy: never
-  #   thread_sandbox: workspace-write
-  #   model: claude-sonnet-4-6
-  #   reasoning_effort: high
   #   network_access: true
   #   turn_timeout_ms: 3600000
-  #   read_timeout_ms: 5000
-  #   stall_timeout_ms: 600000
 
 server:
   port: 8080
