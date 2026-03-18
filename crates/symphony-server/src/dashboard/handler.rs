@@ -239,11 +239,21 @@ function stateBadge(st){
 function esc(s){if(!s)return"";let d=document.createElement("div");d.textContent=s;return d.innerHTML;}
 function fmtRateLimits(rl){
   if(!rl||typeof rl!=="object")return"<p class=\"empty-state\">n/a</p>";
-  // Handle Claude-style rate_limit_info
+  let now=Date.now()/1000;
+  function countdown(epochSecs){
+    if(!epochSecs)return null;
+    let diff=Math.max(0,Math.floor(epochSecs-now));
+    if(diff<=0)return"now";
+    let h=Math.floor(diff/3600),m=Math.floor((diff%3600)/60),s=diff%60;
+    if(h>0)return h+"h "+m+"m";
+    if(m>0)return m+"m "+s+"s";
+    return s+"s";
+  }
   let status=rl.status||rl.rateLimitType||"";
-  let resets=rl.resetsAt?new Date(rl.resetsAt*1000).toLocaleTimeString():null;
-  let overageResets=rl.overageResetsAt?new Date(rl.overageResetsAt*1000).toLocaleTimeString():null;
-  // Handle Codex-style rate limits (may have primary/secondary fields)
+  let resetCountdown=countdown(rl.resetsAt);
+  let resetTime=rl.resetsAt?new Date(rl.resetsAt*1000).toLocaleTimeString():null;
+  let overageCountdown=countdown(rl.overageResetsAt);
+  let overageTime=rl.overageResetsAt?new Date(rl.overageResetsAt*1000).toLocaleTimeString():null;
   let remaining=rl.remaining!=null?rl.remaining:null;
   let limit=rl.limit!=null?rl.limit:null;
   let reset=rl.reset!=null?rl.reset+"s":null;
@@ -255,8 +265,10 @@ function fmtRateLimits(rl){
   if(rl.rateLimitType){
     html+=`<article class="metric-card"><p class="metric-label">Type</p><p class="metric-value">${esc(rl.rateLimitType)}</p></article>`;
   }
-  if(resets){
-    html+=`<article class="metric-card"><p class="metric-label">Resets at</p><p class="metric-value">${resets}</p></article>`;
+  if(resetCountdown){
+    html+=`<article class="metric-card"><p class="metric-label">Resets in</p><p class="metric-value">${resetCountdown}</p>`;
+    if(resetTime)html+=`<p class="metric-detail">${resetTime}</p>`;
+    html+=`</article>`;
   }
   if(remaining!=null&&limit!=null){
     let pct=Math.round((remaining/limit)*100);
@@ -266,12 +278,12 @@ function fmtRateLimits(rl){
     html+=`</article>`;
   }
   if(rl.overageStatus){
-    html+=`<article class="metric-card"><p class="metric-label">Overage</p><p class="metric-value">${esc(rl.overageStatus)}</p>`;
-    if(overageResets)html+=`<p class="metric-detail">Resets at ${overageResets}</p>`;
+    let overageBadge=rl.overageStatus==="allowed"?"state-badge state-badge-active":"state-badge state-badge-danger";
+    html+=`<article class="metric-card"><p class="metric-label">Overage</p><p class="metric-value"><span class="${overageBadge}">${esc(rl.overageStatus)}</span></p>`;
+    if(overageCountdown)html+=`<p class="metric-detail">Resets in ${overageCountdown} (${overageTime})</p>`;
     html+=`</article>`;
   }
   html+="</div>";
-  // If none of the known fields matched, fall back to formatted JSON
   if(!status&&remaining==null&&!rl.rateLimitType){
     html=`<pre class="code-panel">${JSON.stringify(rl,null,2)}</pre>`;
   }
