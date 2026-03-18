@@ -28,9 +28,10 @@ The agent will read this README and create a tailored `WORKFLOW.md` with the rig
 
 ### Prerequisites
 
+- [Rust 1.94+](https://rustup.rs/) (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
+- [Codex CLI](https://github.com/openai/codex) with `app-server` support (`codex app-server` must work)
 - A GitHub repository with issues to process
 - A GitHub personal access token (see [Token Permissions](#token-permissions) below)
-- A Codex-compatible coding agent installed (the `codex` CLI with `app-server` support)
 
 ### 1. Set environment variables
 
@@ -125,39 +126,48 @@ Continuation attempt {{ attempt }}. Resume from current workspace state.
 5. Add label `human-review` to the issue.
 ```
 
-### 3. Run Symphony
+### 3. Install and run Symphony
 
-**With Docker Compose (recommended):**
+Symphony requires `codex` CLI to be installed and configured on the host machine (it launches `codex app-server` as a subprocess). Docker is available for deployment but requires codex to be available inside the container.
+
+**Install from source (recommended):**
+
+```bash
+# Clone the repository
+git clone https://github.com/ChronoAIProject/chronoai-symphony.git
+cd chronoai-symphony
+
+# Install the symphony binary
+cargo install --path crates/symphony-cli
+
+# Run (from your project directory where WORKFLOW.md is)
+cd /path/to/your/project
+symphony ./WORKFLOW.md --port 8080 --pretty-logs
+
+# Dashboard at http://localhost:8080
+```
+
+**Run without installing:**
+
+```bash
+# From the chronoai-symphony repo directory
+cargo run -- /path/to/your/project/WORKFLOW.md --port 8080 --pretty-logs
+```
+
+**With Docker (requires codex installed inside the container):**
 
 ```bash
 # Create a .env file
 echo "GITHUB_TOKEN=ghp_your_token_here" > .env
 
-# Start
+# Start with Docker Compose
 docker compose up -d
 
 # View logs
 docker compose logs -f
-
-# Dashboard at http://localhost:8080
 ```
 
-**With Docker:**
-
-```bash
-docker build -t symphony .
-docker run -d \
-  -e GITHUB_TOKEN=ghp_your_token_here \
-  -v $(pwd)/WORKFLOW.md:/home/symphony/WORKFLOW.md:ro \
-  -p 8080:8080 \
-  symphony ./WORKFLOW.md --port 8080
-```
-
-**From source:**
-
-```bash
-cargo run -- ./WORKFLOW.md --port 8080
-```
+> **Note:** The Docker image does not include codex. You need to either mount the codex binary into the container or build a custom image with codex pre-installed. For most setups, running directly on the host with `cargo install` is simpler.
 
 ## Setup Guide for Your Project
 
