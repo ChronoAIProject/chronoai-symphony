@@ -168,9 +168,21 @@ async fn stream_claude_inner(
                     .get("tool")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
+                let input_summary = parsed.get("input").and_then(|input| {
+                    input.get("command").and_then(|v| v.as_str())
+                        .map(|s| s.chars().take(120).collect::<String>())
+                    .or_else(|| input.get("file_path").and_then(|v| v.as_str())
+                        .map(|s| s.to_string()))
+                    .or_else(|| input.get("pattern").and_then(|v| v.as_str())
+                        .map(|s| s.to_string()))
+                });
+                let msg = match input_summary {
+                    Some(summary) => format!("[{tool_name}] {summary}"),
+                    None => format!("[{tool_name}]"),
+                };
                 let _ = event_tx
                     .send(AgentEvent::Notification {
-                        message: format!("[tool_use] {tool_name}"),
+                        message: msg,
                         timestamp: Utc::now(),
                     })
                     .await;
@@ -323,20 +335,32 @@ async fn handle_assistant_event(
                         .get("name")
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown");
+                    // Extract a summary of the tool input for context.
+                    let input_summary = block.get("input").and_then(|input| {
+                        // For Bash: show the command
+                        input.get("command").and_then(|v| v.as_str())
+                            .map(|s| s.chars().take(120).collect::<String>())
+                        // For Read/Edit: show the file path
+                        .or_else(|| input.get("file_path").and_then(|v| v.as_str())
+                            .map(|s| s.to_string()))
+                        // For Glob/Grep: show the pattern
+                        .or_else(|| input.get("pattern").and_then(|v| v.as_str())
+                            .map(|s| s.to_string()))
+                    });
+                    let msg = match input_summary {
+                        Some(summary) => format!("[{tool_name}] {summary}"),
+                        None => format!("[{tool_name}]"),
+                    };
                     let _ = event_tx
                         .send(AgentEvent::Notification {
-                            message: format!("[tool_use] {tool_name}"),
+                            message: msg,
                             timestamp: Utc::now(),
                         })
                         .await;
                 }
                 "tool_result" => {
-                    let _ = event_tx
-                        .send(AgentEvent::Notification {
-                            message: "[tool_result]".to_string(),
-                            timestamp: Utc::now(),
-                        })
-                        .await;
+                    // Skip tool_result notifications - they're verbose and
+                    // the tool_use already shows what happened.
                 }
                 _ => {
                     debug!(block_type, "unknown content block type");
