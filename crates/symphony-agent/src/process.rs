@@ -23,21 +23,30 @@ impl AgentProcess {
     /// The command is executed via `bash -lc <command>` with the given
     /// working directory. Stdin and stdout are piped for JSON-RPC
     /// communication; stderr is piped and logged separately.
-    pub async fn launch(command: &str, cwd: &Path) -> Result<Self, SymphonyError> {
+    pub async fn launch(
+        command: &str,
+        cwd: &Path,
+        env_vars: &[(&str, &str)],
+    ) -> Result<Self, SymphonyError> {
         info!(command, cwd = %cwd.display(), "launching agent process");
 
         // Merge stderr into stdout. The OpenAI reference uses Erlang's
         // `:stderr_to_stdout` Port option which does OS-level fd dup.
         // We achieve the same with `2>&1` shell redirection.
         let merged_command = format!("{command} 2>&1");
-        let mut child = Command::new("bash")
-            .arg("-lc")
+        let mut cmd = Command::new("bash");
+        cmd.arg("-lc")
             .arg(&merged_command)
             .current_dir(cwd)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
+            .stderr(std::process::Stdio::null());
+
+        for (key, value) in env_vars {
+            cmd.env(key, value);
+        }
+
+        let mut child = cmd.spawn()
             .map_err(|e| SymphonyError::CodexNotFound {
                 command: format!("{command}: {e}"),
             })?;
@@ -158,7 +167,7 @@ mod tests {
     #[tokio::test]
     async fn launch_echo_and_read_output() {
         let dir = TempDir::new().unwrap();
-        let mut proc = AgentProcess::launch("echo hello", dir.path())
+        let mut proc = AgentProcess::launch("echo hello", dir.path(), &[])
             .await
             .unwrap();
 
@@ -173,7 +182,7 @@ mod tests {
     #[tokio::test]
     async fn launch_cat_write_and_read() {
         let dir = TempDir::new().unwrap();
-        let mut proc = AgentProcess::launch("cat", dir.path()).await.unwrap();
+        let mut proc = AgentProcess::launch("cat", dir.path(), &[]).await.unwrap();
 
         proc.write_message(r#"{"hello":"world"}"#).await.unwrap();
         let line = proc.read_line().await.unwrap();
@@ -185,7 +194,7 @@ mod tests {
     #[tokio::test]
     async fn pid_returns_some() {
         let dir = TempDir::new().unwrap();
-        let proc = AgentProcess::launch("sleep 10", dir.path())
+        let proc = AgentProcess::launch("sleep 10", dir.path(), &[])
             .await
             .unwrap();
         assert!(proc.pid().is_some());
@@ -196,7 +205,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         // bash -lc with a nonexistent command will spawn bash (which exits with error),
         // but launch itself should succeed since bash exists.
-        let result = AgentProcess::launch("nonexistent_command_12345", dir.path()).await;
+        let result = AgentProcess::launch("nonexistent_command_12345", dir.path(), &[]).await;
         // This may succeed (bash spawns) or fail depending on environment.
         // We just verify it does not panic.
         drop(result);

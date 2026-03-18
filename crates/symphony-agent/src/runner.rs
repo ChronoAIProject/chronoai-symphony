@@ -95,6 +95,10 @@ impl AgentRunner {
     }
 
     /// Build the agent command with optional model and reasoning effort flags.
+    ///
+    /// `--model` is standard across both Codex and Claude CLIs.
+    /// Reasoning effort is passed as a Codex config flag AND as an env var
+    /// `MODEL_REASONING_EFFORT` so any agent wrapper can read it.
     fn build_command(&self, base_command: &str) -> String {
         let mut cmd = base_command.to_string();
         if let Some(ref model) = self.profile.model {
@@ -104,6 +108,21 @@ impl AgentRunner {
             cmd = format!("{cmd} --config model_reasoning_effort={effort}");
         }
         cmd
+    }
+
+    /// Collect environment variables to pass to the agent subprocess.
+    /// These are set per-process (not global) so parallel agents with
+    /// different configs don't conflict.
+    fn build_env_vars(&self) -> Vec<(String, String)> {
+        let mut vars = Vec::new();
+        if let Some(ref model) = self.profile.model {
+            vars.push(("SYMPHONY_AGENT_MODEL".to_string(), model.clone()));
+        }
+        if let Some(ref effort) = self.profile.reasoning_effort {
+            vars.push(("MODEL_REASONING_EFFORT".to_string(), effort.clone()));
+            vars.push(("SYMPHONY_REASONING_EFFORT".to_string(), effort.clone()));
+        }
+        vars
     }
 
     /// Start a new agent session: launch process and perform handshake.
@@ -132,7 +151,9 @@ impl AgentRunner {
             "starting agent session"
         );
 
-        let mut process = match AgentProcess::launch(&command, workspace_path).await {
+        let env_vars = self.build_env_vars();
+        let env_refs: Vec<(&str, &str)> = env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let mut process = match AgentProcess::launch(&command, workspace_path, &env_refs).await {
             Ok(p) => p,
             Err(e) => {
                 error!(error = %e, "failed to launch agent process");

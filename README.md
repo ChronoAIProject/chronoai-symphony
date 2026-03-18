@@ -206,19 +206,19 @@ agents:
     command: codex app-server          # Launch command.
     approval_policy: never             # never, on-request, granular, etc.
     thread_sandbox: workspace-write
-    model: gpt-5.3-codex              # Codex-specific. Passed as --model flag.
-    reasoning_effort: xhigh            # Codex-specific. Passed as --config flag.
+    model: gpt-5.3-codex              # Passed as --model flag + env var.
+    reasoning_effort: xhigh            # Passed as --config flag + env var.
     network_access: true               # Sandbox network access. Default: true.
     turn_timeout_ms: 3600000           # Turn timeout. Default: 1 hour.
     read_timeout_ms: 5000              # Handshake timeout. Default: 5s.
     stall_timeout_ms: 300000           # Inactivity timeout. Default: 5 min.
   claude:
     command: claude-app-server         # Community wrapper for Claude Code.
-    approval_policy: never             # Same protocol, same approval values.
+    model: claude-sonnet-4-6           # Passed as --model and env var.
+    reasoning_effort: high             # Env var MODEL_REASONING_EFFORT.
+    approval_policy: never
     network_access: true
     turn_timeout_ms: 3600000
-    # model/reasoning_effort are Codex CLI flags; claude-app-server
-    # uses its own configuration (see its README).
 
 # Legacy single-agent format (still supported):
 # codex:
@@ -491,16 +491,18 @@ Define multiple agents in `WORKFLOW.md` and assign them per-issue via GitHub lab
 agents:
   codex:
     command: codex app-server
-    model: gpt-5.3-codex             # Codex-specific: passed as --model flag
-    reasoning_effort: xhigh           # Codex-specific: passed as --config flag
+    model: gpt-5.3-codex
+    reasoning_effort: xhigh
   claude:
-    command: claude-app-server        # Uses its own config for model selection
-    # model and reasoning_effort flags are Codex-specific;
-    # claude-app-server uses its own configuration.
+    command: claude-app-server
+    model: claude-sonnet-4-6
+    reasoning_effort: high
 
 agent:
   default: codex    # Issues without a label use Codex
 ```
+
+`model` is passed as `--model` to the agent command. `reasoning_effort` is passed as a Codex config flag and also set as `MODEL_REASONING_EFFORT` and `SYMPHONY_REASONING_EFFORT` environment variables on the subprocess, so any agent wrapper can read them.
 
 To use Claude for a specific issue, add the label `agent:claude` to the GitHub issue. Symphony will automatically use the matching agent profile. Issues without an `agent:` label use the configured default.
 
