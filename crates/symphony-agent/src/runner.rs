@@ -101,10 +101,10 @@ impl AgentRunner {
     fn build_command(&self, base_command: &str) -> String {
         let mut cmd = base_command.to_string();
         if let Some(ref model) = self.profile.model {
-            cmd = format!("{cmd} --config model=\"{model}\"");
+            cmd = format!("{cmd} -c model={model}");
         }
         if let Some(ref effort) = self.profile.reasoning_effort {
-            cmd = format!("{cmd} --config model_reasoning_effort={effort}");
+            cmd = format!("{cmd} -c model_reasoning_effort={effort}");
         }
         cmd
     }
