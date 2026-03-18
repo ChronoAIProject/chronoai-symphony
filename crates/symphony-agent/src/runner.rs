@@ -289,7 +289,16 @@ impl AgentRunner {
         let mut cmd = self.profile.command.clone();
         cmd = format!("{cmd} -p \"$SYMPHONY_PROMPT\"");
         cmd = format!("{cmd} --output-format stream-json");
-        cmd = format!("{cmd} --dangerously-skip-permissions");
+        // Only skip permissions when approval_policy is "never" (default).
+        // Other policies let Claude prompt for approval (not applicable in
+        // headless mode, but avoids the dangerous flag when not intended).
+        let skip_permissions = self.profile.approval_policy
+            .as_deref()
+            .map(|p| p == "never")
+            .unwrap_or(true);
+        if skip_permissions {
+            cmd = format!("{cmd} --dangerously-skip-permissions");
+        }
         cmd = format!("{cmd} --max-turns {max_turns}");
         cmd = format!("{cmd} --verbose");
         if let Some(ref model) = self.profile.model {
