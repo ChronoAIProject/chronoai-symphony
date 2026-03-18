@@ -30,9 +30,16 @@ hooks:
     git clone --depth 1 https://github.com/your-org/your-repo.git .
   before_run: |
     git fetch origin
-    git checkout main && git pull
     BRANCH="symphony/issue-${SYMPHONY_ISSUE_NUMBER}"
-    git checkout -B "$BRANCH" origin/main
+    if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+      git checkout "$BRANCH"
+      git pull origin "$BRANCH"
+    elif git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+      git checkout "$BRANCH"
+    else
+      git checkout main && git pull
+      git checkout -b "$BRANCH" origin/main
+    fi
   after_run: |
     echo "Agent session completed for ${SYMPHONY_ISSUE_IDENTIFIER}"
   timeout_ms: 300000
