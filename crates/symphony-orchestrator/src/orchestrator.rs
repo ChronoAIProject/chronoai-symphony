@@ -390,12 +390,20 @@ impl Orchestrator {
             "dispatching issue to worker"
         );
 
+        // Resolve agent type for this issue.
+        let agent_type_str = self
+            .config
+            .resolve_agent_for_issue(&issue)
+            .agent_type
+            .to_string();
+
         // Add to running map.
         self.state.running.insert(
             issue_id.clone(),
             RunningEntry {
                 identifier: issue.identifier.clone(),
                 issue: issue.clone(),
+                agent_type: agent_type_str,
                 session_id: None,
                 codex_app_server_pid: None,
                 last_codex_message: None,
@@ -731,6 +739,7 @@ impl Orchestrator {
                     "issue_id": e.issue.id,
                     "issue_identifier": e.identifier,
                     "identifier": e.identifier,
+                    "agent_type": e.agent_type,
                     "state": e.issue.state,
                     "session_id": e.session_id,
                     "turn_count": e.turn_count,
@@ -854,7 +863,7 @@ mod tests {
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::path::PathBuf;
-    use symphony_core::domain::{AgentProfileConfig, HooksConfig, Issue};
+    use symphony_core::domain::{AgentProfileConfig, AgentType, HooksConfig, Issue};
     use symphony_core::error::SymphonyError;
 
     struct NoopTracker;
@@ -882,6 +891,7 @@ mod tests {
 
     fn test_config() -> ServiceConfig {
         let default_profile = AgentProfileConfig {
+            agent_type: AgentType::Codex,
             command: "codex app-server".to_string(),
             approval_policy: None,
             thread_sandbox: None,
@@ -892,6 +902,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             network_access: true,
+            max_turns: None,
         };
         let mut agent_profiles = HashMap::new();
         agent_profiles.insert("codex".to_string(), default_profile);

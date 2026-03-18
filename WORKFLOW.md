@@ -56,10 +56,12 @@ agents:
     read_timeout_ms: 5000
     stall_timeout_ms: 600000
   # claude:                              # Uncomment to enable. Add `agent:claude` label to issues.
-  #   command: claude-app-server         # npm i -g claude-app-server
-  #   approval_policy: never
+  #   agent_type: claude-cli             # Uses official Claude Code CLI directly.
+  #   command: claude                    # Official CLI, no third-party wrapper needed.
+  #   model: claude-sonnet-4-6
+  #   max_turns: 20
   #   network_access: true
-  #   turn_timeout_ms: 3600000
+  #   turn_timeout_ms: 7200000           # 2 hours for full session.
 
 server:
   port: 8080

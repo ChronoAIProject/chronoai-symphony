@@ -213,12 +213,12 @@ agents:
     read_timeout_ms: 5000              # Handshake timeout. Default: 5s.
     stall_timeout_ms: 300000           # Inactivity timeout. Default: 5 min.
   claude:
-    command: claude-app-server         # Community wrapper for Claude Code.
-    model: claude-sonnet-4-6           # Passed as --model and env var.
-    reasoning_effort: high             # Env var MODEL_REASONING_EFFORT.
-    approval_policy: never
+    agent_type: claude-cli             # Native Claude Code CLI integration.
+    command: claude                    # Official CLI, no wrapper needed.
+    model: claude-sonnet-4-6           # Passed as --model flag.
+    max_turns: 20                      # Passed as --max-turns flag.
     network_access: true
-    turn_timeout_ms: 3600000
+    turn_timeout_ms: 7200000           # 2 hours for full Claude session.
 
 # Legacy single-agent format (still supported):
 # codex:
@@ -474,14 +474,12 @@ Options:
 
 ## Supported Agents
 
-Symphony works with any coding agent that implements the Codex app-server JSON-RPC protocol over stdio:
+Symphony supports two integration modes:
 
-| Agent | Command | Install | Notes |
-|-------|---------|---------|-------|
-| [OpenAI Codex](https://github.com/openai/codex) | `codex app-server` | `npm i -g @openai/codex` | The reference implementation. `model` and `reasoning_effort` are passed as CLI flags. |
-| [claude-app-server](https://github.com/sumansid/claude-app-server) | `claude-app-server` | `npm i -g claude-app-server` | Third-party wrapper that bridges Claude Code to the Codex JSON-RPC protocol. Has its own config for model selection. |
-
-> **Note:** `claude-app-server` is a community wrapper around Claude Code, not the official Claude CLI. It translates the Codex app-server protocol so Symphony can orchestrate Claude Code sessions. Check its README for configuration options (model, API key, etc.).
+| Agent | Type | Command | Install | Notes |
+|-------|------|---------|---------|-------|
+| [OpenAI Codex](https://github.com/openai/codex) | `codex` (default) | `codex app-server` | `npm i -g @openai/codex` | JSON-RPC protocol over stdio. Multi-turn sessions managed by Symphony. |
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `claude-cli` | `claude` | [Install guide](https://docs.anthropic.com/en/docs/claude-code/getting-started) | Native CLI integration. Uses `claude -p` with `--output-format stream-json`. Single invocation, Claude manages its own turns. |
 
 ### Multi-agent setup
 
@@ -494,19 +492,26 @@ agents:
     model: gpt-5.3-codex
     reasoning_effort: xhigh
   claude:
-    command: claude-app-server
+    agent_type: claude-cli             # Native Claude Code CLI
+    command: claude                    # Official CLI, no wrapper needed
     model: claude-sonnet-4-6
-    reasoning_effort: high
+    max_turns: 20
 
 agent:
   default: codex    # Issues without a label use Codex
 ```
 
-`model` is passed as `--model` to the agent command. `reasoning_effort` is passed as a Codex config flag and also set as `MODEL_REASONING_EFFORT` and `SYMPHONY_REASONING_EFFORT` environment variables on the subprocess, so any agent wrapper can read them.
+To use Claude for a specific issue, add the label `agent:claude` to the GitHub issue. Both agents can run in parallel on different issues simultaneously.
 
-To use Claude for a specific issue, add the label `agent:claude` to the GitHub issue. Symphony will automatically use the matching agent profile. Issues without an `agent:` label use the configured default.
+**Key differences between agent types:**
 
-Both agents can run in parallel on different issues simultaneously.
+| | Codex (`codex`) | Claude Code (`claude-cli`) |
+|---|---|---|
+| Protocol | JSON-RPC over stdio | `claude -p` with stream-json output |
+| Handshake | initialize -> thread/start -> turn/start | None (single CLI invocation) |
+| Turn management | Symphony manages multi-turn loop | Claude CLI manages internally via `--max-turns` |
+| Approval handling | Symphony's approval queue UI | `--dangerously-skip-permissions` (auto-approve) |
+| Prompt delivery | JSON-RPC `turn/start` message | `$SYMPHONY_PROMPT` env var |
 
 ## Authentication
 

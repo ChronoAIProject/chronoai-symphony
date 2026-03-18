@@ -19,6 +19,33 @@ pub struct HooksConfig {
     pub timeout_ms: u64,
 }
 
+/// The type of agent backend to use for a profile.
+///
+/// Determines the communication protocol: Codex uses JSON-RPC with
+/// handshake and multi-turn loop; Claude CLI uses a single subprocess
+/// invocation with streaming JSON output.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentType {
+    Codex,
+    ClaudeCli,
+}
+
+impl Default for AgentType {
+    fn default() -> Self {
+        Self::Codex
+    }
+}
+
+impl std::fmt::Display for AgentType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Codex => write!(f, "codex"),
+            Self::ClaudeCli => write!(f, "claude-cli"),
+        }
+    }
+}
+
 /// Configuration for a single named agent profile.
 ///
 /// Each profile describes how to launch and communicate with a specific
@@ -26,6 +53,7 @@ pub struct HooksConfig {
 /// in a single workflow, selected per-issue via labels.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentProfileConfig {
+    pub agent_type: AgentType,
     pub command: String,
     pub approval_policy: Option<String>,
     pub thread_sandbox: Option<String>,
@@ -36,6 +64,7 @@ pub struct AgentProfileConfig {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub network_access: bool,
+    pub max_turns: Option<u32>,
 }
 
 /// Fully resolved service configuration with typed fields and applied defaults.
@@ -278,6 +307,7 @@ impl ServiceConfig {
 /// Build a default `AgentProfileConfig` with standard Codex defaults.
 fn default_agent_profile() -> AgentProfileConfig {
     AgentProfileConfig {
+        agent_type: AgentType::Codex,
         command: "codex app-server".to_owned(),
         approval_policy: None,
         thread_sandbox: None,
@@ -288,12 +318,22 @@ fn default_agent_profile() -> AgentProfileConfig {
         model: None,
         reasoning_effort: None,
         network_access: true,
+        max_turns: None,
     }
 }
 
 /// Parse an `AgentProfileConfig` from a YAML mapping section.
 fn parse_profile_from_mapping(mapping: &Mapping) -> AgentProfileConfig {
+    let agent_type = get_str(mapping, "agent_type")
+        .or_else(|| get_str(mapping, "type"))
+        .map(|v| match v.to_lowercase().as_str() {
+            "claude-cli" | "claude_cli" | "claudecli" => AgentType::ClaudeCli,
+            _ => AgentType::Codex,
+        })
+        .unwrap_or(AgentType::Codex);
+
     AgentProfileConfig {
+        agent_type,
         command: get_str(mapping, "command")
             .unwrap_or_else(|| "codex app-server".to_owned()),
         approval_policy: get_str(mapping, "approval_policy"),
@@ -310,6 +350,7 @@ fn parse_profile_from_mapping(mapping: &Mapping) -> AgentProfileConfig {
         network_access: get_str(mapping, "network_access")
             .map(|v| v.to_lowercase() != "false")
             .unwrap_or(true),
+        max_turns: get_u32(mapping, "max_turns"),
     }
 }
 

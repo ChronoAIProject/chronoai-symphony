@@ -9,7 +9,7 @@ pub mod workflow;
 pub mod workspace;
 
 pub use codex_totals::CodexTotals;
-pub use config::{AgentProfileConfig, HooksConfig, ServiceConfig};
+pub use config::{AgentProfileConfig, AgentType, HooksConfig, ServiceConfig};
 pub use issue::{BlockerRef, Issue};
 pub use live_session::LiveSession;
 pub use orchestrator_state::{OrchestratorState, RunningEntry};

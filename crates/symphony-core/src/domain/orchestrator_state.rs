@@ -12,6 +12,7 @@ use super::retry_entry::RetryEntry;
 pub struct RunningEntry {
     pub identifier: String,
     pub issue: Issue,
+    pub agent_type: String,
 
     pub session_id: Option<String>,
     pub codex_app_server_pid: Option<String>,

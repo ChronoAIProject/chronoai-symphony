@@ -105,10 +105,11 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::path::PathBuf;
-    use symphony_core::domain::config::{AgentProfileConfig, HooksConfig};
+    use symphony_core::domain::config::{AgentProfileConfig, AgentType, HooksConfig};
 
     fn valid_config() -> ServiceConfig {
         let default_profile = AgentProfileConfig {
+            agent_type: AgentType::Codex,
             command: "codex".to_string(),
             approval_policy: None,
             thread_sandbox: None,
@@ -119,6 +120,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             network_access: true,
+            max_turns: None,
         };
         let mut agent_profiles = HashMap::new();
         agent_profiles.insert("codex".to_string(), default_profile);

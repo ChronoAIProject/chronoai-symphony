@@ -16,6 +16,7 @@ use tracing::{error, info};
 
 use crate::approval_handler::ApprovalHandler;
 use crate::process::AgentProcess;
+use crate::protocol::claude_cli;
 use crate::protocol::events::AgentEvent;
 use crate::protocol::handshake::{perform_handshake, SessionInfo};
 use crate::protocol::messages::{
@@ -153,7 +154,7 @@ impl AgentRunner {
 
         let env_vars = self.build_env_vars();
         let env_refs: Vec<(&str, &str)> = env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        let mut process = match AgentProcess::launch(&command, workspace_path, &env_refs).await {
+        let mut process = match AgentProcess::launch(&command, workspace_path, &env_refs, true).await {
             Ok(p) => p,
             Err(e) => {
                 error!(error = %e, "failed to launch agent process");
@@ -280,5 +281,119 @@ impl AgentRunner {
             self.profile.turn_timeout_ms,
             self.profile.stall_timeout_ms,
         )
+    }
+
+    /// Build the Claude CLI command string.
+    ///
+    /// Constructs `claude -p "$SYMPHONY_PROMPT" --output-format stream-json`
+    /// with optional model and max-turns flags.
+    fn build_claude_command(&self, max_turns: u32) -> String {
+        let mut cmd = self.profile.command.clone();
+        cmd = format!("{cmd} -p \"$SYMPHONY_PROMPT\"");
+        cmd = format!("{cmd} --output-format stream-json");
+        cmd = format!("{cmd} --dangerously-skip-permissions");
+        cmd = format!("{cmd} --max-turns {max_turns}");
+        cmd = format!("{cmd} --verbose");
+        if let Some(ref model) = self.profile.model {
+            cmd = format!("{cmd} --model {model}");
+        }
+        cmd
+    }
+
+    /// Start a Claude CLI session. No handshake needed.
+    ///
+    /// Launches the `claude` CLI subprocess with the prompt passed via
+    /// the `SYMPHONY_PROMPT` environment variable to avoid shell escaping
+    /// issues. Returns an `AgentSession` ready for streaming.
+    pub async fn start_claude_session(
+        &self,
+        workspace_path: &Path,
+        issue: &Issue,
+        prompt: &str,
+        max_turns: u32,
+        event_tx: &mpsc::Sender<AgentEvent>,
+    ) -> Result<AgentSession, SymphonyError> {
+        let command = self.build_claude_command(max_turns);
+
+        info!(
+            issue_id = %issue.id,
+            command = %command,
+            cwd = %workspace_path.display(),
+            "starting Claude CLI session"
+        );
+
+        // Pass prompt via env var to avoid shell escaping issues.
+        let mut env_vars = self.build_env_vars();
+        env_vars.push(("SYMPHONY_PROMPT".to_string(), prompt.to_string()));
+        let env_refs: Vec<(&str, &str)> =
+            env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+
+        // Do not merge stderr for Claude CLI (stream-json goes to stdout,
+        // verbose logs go to stderr).
+        let process = match AgentProcess::launch(
+            &command, workspace_path, &env_refs, false,
+        ).await {
+            Ok(p) => p,
+            Err(e) => {
+                error!(error = %e, "failed to launch Claude CLI process");
+                let _ = event_tx
+                    .send(AgentEvent::StartupFailed {
+                        error: e.to_string(),
+                        timestamp: Utc::now(),
+                    })
+                    .await;
+                return Err(e);
+            }
+        };
+
+        let session_id = format!(
+            "claude-{:x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
+        let session_info = SessionInfo {
+            thread_id: session_id.clone(),
+            turn_id: "1".to_string(),
+            session_id: session_id.clone(),
+        };
+
+        let pid = process.pid().map(|p| p.to_string());
+
+        let _ = event_tx
+            .send(AgentEvent::SessionStarted {
+                session_id: session_id.clone(),
+                thread_id: session_id.clone(),
+                turn_id: "1".to_string(),
+                pid,
+                timestamp: Utc::now(),
+            })
+            .await;
+
+        Ok(AgentSession {
+            process,
+            session_info,
+            workspace_path: workspace_path.to_path_buf(),
+        })
+    }
+
+    /// Run the entire Claude CLI session.
+    ///
+    /// This is a single blocking call -- Claude CLI manages its own turn
+    /// loop internally. No multi-turn loop, no approval handler, and no
+    /// continuation prompts are needed.
+    pub async fn run_claude_session(
+        &self,
+        session: &mut AgentSession,
+        event_tx: &mpsc::Sender<AgentEvent>,
+    ) -> Result<TurnResult, SymphonyError> {
+        let timeout = self.build_timeout_config();
+        claude_cli::stream_claude_session(
+            &mut session.process,
+            event_tx,
+            timeout.turn_timeout,
+        )
+        .await
     }
 }

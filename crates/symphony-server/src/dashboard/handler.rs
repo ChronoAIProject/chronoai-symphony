@@ -352,7 +352,7 @@ function render(data){
     </colgroup>
     <thead><tr>
       <th>Issue</th><th>State</th><th>Session</th>
-      <th>Runtime / turns</th><th>Codex update</th><th>Tokens</th>
+      <th>Runtime / turns</th><th>Agent update</th><th>Tokens</th>
     </tr></thead><tbody>`;
     run.forEach(function(e){
       let rt=fmtRuntime(timeSince(e.started_at,now));
@@ -365,11 +365,13 @@ function render(data){
       if(e.tokens){tIn=e.tokens.input_tokens||tIn;tOut=e.tokens.output_tokens||tOut;tTot=e.tokens.total_tokens||tTot;}
       let st=e.state||(e.issue&&e.issue.state)||"";
       let id=esc(e.issue_identifier||e.identifier||"");
+      let agentType=esc(e.agent_type||"codex");
+      let agentBadge=agentType==="claude-cli"?"<span class=\"state-badge\" style=\"font-size:0.7rem;padding:0.15rem 0.45rem;margin-left:0.3rem;background:#f0e6ff;border-color:#c8a2f0;color:#6b21a8\">Claude</span>":"<span class=\"state-badge\" style=\"font-size:0.7rem;padding:0.15rem 0.45rem;margin-left:0.3rem\">Codex</span>";
       let issueKey=e.issue_id||id;
       let activityLog=e.activity||e.activity_log||[];
       let hasActivity=activityLog.length>0;
       html+=`<tr>
-        <td><div class="issue-stack"><span class="issue-id">${id}</span>
+        <td><div class="issue-stack"><span class="issue-id">${id}${agentBadge}</span>
           <a class="issue-link" href="/api/v1/${encodeURIComponent(id)}">JSON details</a>`;
       if(hasActivity){
         html+=`<button class="activity-toggle" onclick="toggleActivity('${esc(issueKey)}')">${expandedActivities[issueKey]?"Hide activity":"Activity ("+activityLog.length+")"}</button>`;

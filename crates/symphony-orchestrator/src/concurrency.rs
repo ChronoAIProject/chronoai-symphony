@@ -91,6 +91,7 @@ mod tests {
                 created_at: None,
                 updated_at: None,
             },
+            agent_type: "codex".to_string(),
             session_id: None,
             codex_app_server_pid: None,
             last_codex_message: None,

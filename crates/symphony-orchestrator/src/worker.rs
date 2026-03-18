@@ -9,7 +9,7 @@ use std::sync::Arc;
 use symphony_agent::protocol::events::AgentEvent;
 use symphony_agent::protocol::streaming::TurnResult;
 use symphony_agent::runner::AgentRunner;
-use symphony_core::domain::{Issue, ServiceConfig};
+use symphony_core::domain::{AgentType, Issue, ServiceConfig};
 use symphony_core::identifiers::normalize_state;
 use symphony_tracker::traits::IssueTracker;
 use symphony_workflow::template::render_prompt;
@@ -63,6 +63,8 @@ pub async fn run_worker(
 
     // Resolve which agent profile to use for this issue.
     let profile = config.resolve_agent_for_issue(&issue).clone();
+    let agent_type = profile.agent_type.clone();
+    let profile_max_turns = profile.max_turns;
     let agent_runner = AgentRunner::new(profile);
 
     info!(
@@ -122,35 +124,163 @@ pub async fn run_worker(
         }
     });
 
-    // Step 3: Start agent session.
+    // Branch on agent type.
+    let exit_reason = match agent_type {
+        AgentType::ClaudeCli => {
+            let effective_max_turns = profile_max_turns.unwrap_or(max_turns);
+            run_claude_worker(
+                &agent_runner,
+                &issue,
+                &issue_id,
+                &identifier,
+                &rendered_prompt,
+                effective_max_turns,
+                &workspace_path,
+                &local_tx,
+                &cancel_rx,
+            )
+            .await
+        }
+        AgentType::Codex => {
+            run_codex_worker(
+                &agent_runner,
+                &issue,
+                &issue_id,
+                &identifier,
+                &rendered_prompt,
+                max_turns,
+                &workspace_path,
+                &local_tx,
+                &cancel_rx,
+                &config,
+                &tracker,
+                &approval_queue,
+            )
+            .await
+        }
+    };
+
+    // Run after_run hook (best effort).
+    workspace_manager.run_after_run_hook(&workspace_path, Some(&issue_id), Some(&identifier)).await;
+
+    info!(
+        issue_id = %issue_id,
+        exit_reason = ?exit_reason,
+        "worker finished"
+    );
+
+    WorkerResult {
+        issue_id,
+        exit_reason,
+    }
+}
+
+/// Run a Claude CLI worker session.
+///
+/// Single subprocess invocation -- Claude manages its own turn loop.
+/// No approval handler, no between-turn issue state checks.
+async fn run_claude_worker(
+    agent_runner: &AgentRunner,
+    issue: &Issue,
+    issue_id: &str,
+    _identifier: &str,
+    prompt: &str,
+    max_turns: u32,
+    workspace_path: &std::path::Path,
+    event_tx: &mpsc::Sender<AgentEvent>,
+    cancel_rx: &tokio::sync::watch::Receiver<bool>,
+) -> WorkerExitReason {
+    if *cancel_rx.borrow() {
+        info!(issue_id = %issue_id, "worker cancelled before start");
+        return WorkerExitReason::Abnormal("cancelled by orchestrator".to_string());
+    }
+
     let mut session = match agent_runner
-        .start_session(&workspace_path, &issue, &rendered_prompt, &local_tx)
+        .start_claude_session(workspace_path, issue, prompt, max_turns, event_tx)
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            error!(issue_id = %issue_id, error = %e, "failed to start Claude session");
+            return WorkerExitReason::Abnormal(format!("claude session start failed: {e}"));
+        }
+    };
+
+    let turn_result = match agent_runner.run_claude_session(&mut session, event_tx).await {
+        Ok(result) => result,
+        Err(e) => {
+            error!(issue_id = %issue_id, error = %e, "Claude session error");
+            let _ = agent_runner.stop_session(&mut session).await;
+            return WorkerExitReason::Abnormal(format!("claude session error: {e}"));
+        }
+    };
+
+    let _ = agent_runner.stop_session(&mut session).await;
+
+    match turn_result {
+        TurnResult::Completed => {
+            info!(issue_id = %issue_id, "Claude session completed");
+            WorkerExitReason::Normal
+        }
+        TurnResult::Failed(error) => {
+            warn!(issue_id = %issue_id, error = %error, "Claude session failed");
+            WorkerExitReason::Abnormal(format!("claude session failed: {error}"))
+        }
+        TurnResult::TimedOut => {
+            warn!(issue_id = %issue_id, "Claude session timed out");
+            WorkerExitReason::Abnormal("claude session timed out".to_string())
+        }
+        TurnResult::ProcessExited => {
+            warn!(issue_id = %issue_id, "Claude process exited");
+            WorkerExitReason::Abnormal("claude process exited unexpectedly".to_string())
+        }
+        other => {
+            warn!(issue_id = %issue_id, result = ?other, "Claude session ended");
+            WorkerExitReason::Normal
+        }
+    }
+}
+
+/// Run a Codex worker session with multi-turn loop.
+///
+/// Extracted from the original worker logic for the Codex JSON-RPC protocol.
+#[allow(clippy::too_many_arguments)]
+async fn run_codex_worker(
+    agent_runner: &AgentRunner,
+    issue: &Issue,
+    issue_id: &str,
+    identifier: &str,
+    rendered_prompt: &str,
+    max_turns: u32,
+    workspace_path: &std::path::Path,
+    local_tx: &mpsc::Sender<AgentEvent>,
+    cancel_rx: &tokio::sync::watch::Receiver<bool>,
+    config: &ServiceConfig,
+    tracker: &Arc<dyn IssueTracker>,
+    approval_queue: &Arc<PendingApprovalQueue>,
+) -> WorkerExitReason {
+    let mut session = match agent_runner
+        .start_session(workspace_path, issue, rendered_prompt, local_tx)
         .await
     {
         Ok(session) => session,
         Err(e) => {
             error!(issue_id = %issue_id, error = %e, "failed to start session");
-            workspace_manager.run_after_run_hook(&workspace_path, Some(&issue_id), Some(&identifier)).await;
-            return WorkerResult {
-                issue_id,
-                exit_reason: WorkerExitReason::Abnormal(format!("session start failed: {e}")),
-            };
+            return WorkerExitReason::Abnormal(format!("session start failed: {e}"));
         }
     };
 
     // Create a queued approval handler for this worker.
     let approval_handler = QueuedApprovalHandler::new(
-        approval_queue,
-        issue_id.clone(),
-        issue.identifier.clone(),
+        Arc::clone(approval_queue),
+        issue_id.to_string(),
+        identifier.to_string(),
     );
 
-    // Step 4: Turn loop.
     let mut turn_count = 0u32;
     let mut exit_reason = WorkerExitReason::Normal;
 
     for turn_num in 0..max_turns {
-        // Check if we've been cancelled (e.g., stall detection).
         if *cancel_rx.borrow() {
             info!(issue_id = %issue_id, "worker cancelled by orchestrator");
             exit_reason = WorkerExitReason::Abnormal("cancelled by orchestrator".to_string());
@@ -159,7 +289,7 @@ pub async fn run_worker(
 
         let is_first_turn = turn_num == 0;
         let prompt = if is_first_turn {
-            rendered_prompt.clone()
+            rendered_prompt.to_string()
         } else {
             DEFAULT_CONTINUATION_PROMPT.to_string()
         };
@@ -175,9 +305,9 @@ pub async fn run_worker(
             .run_turn(
                 &mut session,
                 &prompt,
-                &issue,
+                issue,
                 is_first_turn,
-                &local_tx,
+                local_tx,
                 &approval_handler,
             )
             .await
@@ -227,11 +357,9 @@ pub async fn run_worker(
         }
 
         // Check issue state via tracker before next turn.
-        // Stop if the issue has moved to a terminal state OR a handoff
-        // state like "Human Review" where the agent should not continue.
         if turn_num + 1 < max_turns {
             match tracker
-                .fetch_issue_states_by_ids(&[issue_id.clone()])
+                .fetch_issue_states_by_ids(&[issue_id.to_string()])
                 .await
             {
                 Ok(issues) => {
@@ -251,12 +379,10 @@ pub async fn run_worker(
                             break;
                         }
 
-                        // Stop if the issue moved to a "handoff" state
-                        // where the agent should wait for human action.
-                        // These are states like "Human Review" where the
-                        // agent has finished its work and is waiting.
-                        let handoff_states = ["human review", "human-review", "humanreview",
-                                              "merging", "blocked"];
+                        let handoff_states = [
+                            "human review", "human-review", "humanreview",
+                            "merging", "blocked",
+                        ];
                         let is_handoff = handoff_states
                             .iter()
                             .any(|h| normalize_state(h) == normalized);
@@ -288,25 +414,18 @@ pub async fn run_worker(
         }
     }
 
-    // Step 5: Stop session.
     if let Err(e) = agent_runner.stop_session(&mut session).await {
         warn!(issue_id = %issue_id, error = %e, "failed to stop session cleanly");
     }
-
-    // Step 6: Run after_run hook (best effort).
-    workspace_manager.run_after_run_hook(&workspace_path, Some(&issue_id), Some(&identifier)).await;
 
     info!(
         issue_id = %issue_id,
         turns = turn_count,
         exit_reason = ?exit_reason,
-        "worker finished"
+        "codex worker finished"
     );
 
-    WorkerResult {
-        issue_id,
-        exit_reason,
-    }
+    exit_reason
 }
 
 #[cfg(test)]
