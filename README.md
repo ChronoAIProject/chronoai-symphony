@@ -219,6 +219,8 @@ agents:
     command: claude                    # Official CLI, no wrapper needed.
     model: claude-sonnet-4-6           # Passed as --model flag.
     reasoning_effort: high             # Passed as --effort flag. low/medium/high/max.
+    approval_policy: never             # "never" → --dangerously-skip-permissions.
+                                        # Omit or set other value to let Claude prompt.
     max_turns: 20                      # Passed as --max-turns flag.
     network_access: true
     turn_timeout_ms: 7200000           # 2 hours for full Claude session.
@@ -551,7 +553,7 @@ The implementation agent moves the issue to `code-review` when done. Symphony au
 | Protocol | JSON-RPC over stdio | `claude -p` with stream-json output |
 | Handshake | initialize -> thread/start -> turn/start | None (single CLI invocation) |
 | Turn management | Symphony manages multi-turn loop | Claude CLI manages internally via `--max-turns` |
-| Approval handling | Symphony's approval queue UI | `--dangerously-skip-permissions` (auto-approve) |
+| Approval policy | Sent in JSON-RPC handshake params | `never` → `--dangerously-skip-permissions` |
 | Prompt delivery | JSON-RPC `turn/start` message | `$SYMPHONY_PROMPT` env var |
 | Model flag | `-c model=<value>` | `--model <value>` |
 | Reasoning effort | `-c model_reasoning_effort=<value>` | `--effort <value>` (low/medium/high/max) |
