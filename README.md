@@ -111,7 +111,8 @@ Symphony maps issue states using GitHub labels. Create these labels in your repo
 |-------|---------|---------------|
 | `todo` | Issue ready for agent to pick up | Active (dispatched) |
 | `in-progress` | Agent is working on it | Active (tracked) |
-| `human-review` | Agent finished, PR attached, needs human review | Active (handoff) |
+| `code-review` | PR created, automated review in progress | Active (review agent) |
+| `human-review` | Automated review passed, needs human approval | Active (handoff) |
 | `rework` | Reviewer requested changes on the PR | Active (agent addresses feedback) |
 | `done` | Work is complete | Terminal (workspace cleaned) |
 | `cancelled` | Issue abandoned | Terminal (workspace cleaned) |
@@ -119,7 +120,17 @@ Symphony maps issue states using GitHub labels. Create these labels in your repo
 An open issue with **no workflow label** defaults to state `Todo`.
 A **closed** issue defaults to state `Done`.
 
-**Review lifecycle:** When the agent finishes, it adds `human-review`. A human reviews the PR. If changes are needed, the human swaps the label to `rework`. Symphony re-dispatches the agent, which reads PR review comments, addresses feedback, pushes fixes, and moves back to `human-review`. This cycle repeats until the human approves and adds `done`.
+**Review lifecycle:**
+```
+Todo → In Progress (Codex) → Code Review (Claude) → Human Review → Done
+                                    ↑                       |
+                                    └── Rework (Codex) ←────┘
+```
+
+1. Implementation agent finishes and adds `code-review`
+2. Review agent (e.g., Claude) reviews the PR, either approves (`human-review`) or requests changes (`rework`)
+3. If rework: implementation agent addresses feedback, moves back to `code-review`
+4. If approved: human reviews, then adds `done`
 
 ### Step 2: Write your WORKFLOW.md
 

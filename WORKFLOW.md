@@ -145,35 +145,24 @@ gh api repos/{owner}/{repo}/issues/comments/{comment_id} -X PATCH -f body="## Sy
 - [ ] Validation"
 ```
 
-## Execution Flow
+## Execution Flow (In Progress)
 
 1. Find or create the Symphony Workpad comment (see above).
 2. Write your plan as a checklist in the workpad.
 3. Implement the changes. Update the SAME comment as tasks complete.
 4. Run tests and validation.
 5. Push branch and create PR.
-6. Run the PR feedback sweep before marking as `human-review`.
-
-## PR Feedback Sweep
-
-Before moving to `human-review`, check all PR feedback:
-
-1. Read PR comments: `gh pr view --comments`
-2. Read inline review comments: `gh api repos/{owner}/{repo}/pulls/{pr_number}/comments`
-3. For each actionable comment: fix the code OR post a justified reply.
-4. Re-run tests after changes. Push updates.
-5. Repeat until no outstanding comments remain.
+6. Add label `code-review` to the issue (triggers automated review by the review agent).
 
 ## Rework Flow
 
 When state is `rework`:
 
-1. Read ALL review comments on the existing PR.
+1. Read ALL review comments on the existing PR (both human and automated).
 2. Address each comment: fix code or reply with justification.
 3. Run full test suite.
 4. Push fixes to the same branch.
-5. Complete the PR feedback sweep.
-6. Change label from `rework` to `human-review`.
+5. Add label `code-review` to the issue (triggers another automated review).
 
 {% if issue.labels.size > 0 %}
 ## Labels
@@ -188,11 +177,10 @@ When state is `rework`:
 
 ## Quality Checklist
 
-Before moving to `human-review`:
+Before moving to `code-review`:
 - [ ] All tests pass
 - [ ] No linting warnings
 - [ ] No hardcoded secrets
 - [ ] Conventional commit messages
 - [ ] PR created with `Closes {{ issue.identifier }}`
-- [ ] PR feedback sweep completed
 - [ ] Progress comment updated with final status
