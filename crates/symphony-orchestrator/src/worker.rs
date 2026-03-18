@@ -53,7 +53,7 @@ pub async fn run_worker(
     workspace_manager: Arc<WorkspaceManager>,
     event_tx: mpsc::Sender<(String, AgentEvent)>,
     approval_queue: Arc<PendingApprovalQueue>,
-    mut cancel_rx: tokio::sync::watch::Receiver<bool>,
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
 ) -> WorkerResult {
     let issue_id = issue.id.clone();
     let identifier = issue.identifier.clone();

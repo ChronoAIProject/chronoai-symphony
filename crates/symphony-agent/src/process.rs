@@ -8,7 +8,7 @@ use std::path::Path;
 use symphony_core::error::SymphonyError;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 /// Handle to a running agent subprocess with piped stdin/stdout.
 pub struct AgentProcess {

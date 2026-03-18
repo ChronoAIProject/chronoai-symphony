@@ -551,17 +551,6 @@ fn parse_id_value(id: &str) -> Value {
     }
 }
 
-/// Extract a human-readable message from a notification payload.
-fn extract_notification_text(msg: &Value) -> String {
-    let params = msg.get("params").unwrap_or(msg);
-    params
-        .get("message")
-        .and_then(|v| v.as_str())
-        .or_else(|| params.get("text").and_then(|v| v.as_str()))
-        .or_else(|| msg.get("method").and_then(|v| v.as_str()))
-        .unwrap_or("")
-        .to_string()
-}
 
 #[cfg(test)]
 mod tests {
@@ -625,15 +614,4 @@ mod tests {
         assert_eq!(parse_id_value("abc"), Value::String("abc".into()));
     }
 
-    #[test]
-    fn notification_text_from_message() {
-        let msg = json!({"method": "some/event", "params": {"message": "Working on tests"}});
-        assert_eq!(extract_notification_text(&msg), "Working on tests");
-    }
-
-    #[test]
-    fn notification_text_fallback_to_method() {
-        let msg = json!({"method": "some/event", "params": {}});
-        assert_eq!(extract_notification_text(&msg), "some/event");
-    }
 }
