@@ -33,6 +33,11 @@ pub struct ServiceConfig {
     pub tracker_active_states: Vec<String>,
     pub tracker_terminal_states: Vec<String>,
 
+    // -- github app (optional, alternative to api_key) --
+    pub github_app_id: Option<u64>,
+    pub github_app_installation_id: Option<u64>,
+    pub github_app_private_key_path: Option<String>,
+
     // -- polling --
     pub polling_interval_ms: u64,
 
@@ -91,7 +96,7 @@ impl ServiceConfig {
         let tracker_api_key = get_str(&tracker, "api_key")
             .map(|v| resolve_env_var(&v))
             .transpose()?
-            .ok_or(SymphonyError::MissingTrackerApiKey)?;
+            .unwrap_or_default(); // Can be empty when using GitHub App auth
 
         let tracker_project_slug = get_str(&tracker, "project_slug")
             .ok_or(SymphonyError::MissingTrackerProjectSlug)?;
@@ -109,6 +114,13 @@ impl ServiceConfig {
                     "Done".to_owned(),
                 ]
             });
+
+        // -- github app --
+        let github_app_id = get_u64(&tracker, "app_id");
+        let github_app_installation_id = get_u64(&tracker, "installation_id");
+        let github_app_private_key_path = get_str(&tracker, "private_key_path")
+            .map(|v| resolve_env_var(&v))
+            .transpose()?;
 
         // -- polling --
         let polling_interval_ms = get_u64(&polling, "interval_ms")
@@ -165,6 +177,9 @@ impl ServiceConfig {
             tracker_project_slug,
             tracker_active_states,
             tracker_terminal_states,
+            github_app_id,
+            github_app_installation_id,
+            github_app_private_key_path,
             polling_interval_ms,
             workspace_root,
             hooks,
@@ -332,7 +347,7 @@ tracker:
     }
 
     #[test]
-    fn from_workflow_missing_api_key() {
+    fn from_workflow_missing_api_key_defaults_to_empty() {
         let wf = make_workflow(
             r#"
 tracker:
@@ -340,8 +355,9 @@ tracker:
   project_slug: owner/repo
 "#,
         );
-        let err = ServiceConfig::from_workflow(&wf).unwrap_err();
-        assert!(matches!(err, SymphonyError::MissingTrackerApiKey));
+        // api_key is now optional (can use GitHub App auth instead).
+        let cfg = ServiceConfig::from_workflow(&wf).unwrap();
+        assert_eq!(cfg.tracker_api_key, "");
     }
 
     #[test]

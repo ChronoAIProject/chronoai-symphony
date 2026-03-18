@@ -915,6 +915,9 @@ mod tests {
             codex_read_timeout_ms: 5_000,
             codex_stall_timeout_ms: 300_000,
             server_port: None,
+            github_app_id: None,
+            github_app_installation_id: None,
+            github_app_private_key_path: None,
         }
     }
 

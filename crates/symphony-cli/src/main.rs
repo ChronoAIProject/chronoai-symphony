@@ -70,8 +70,51 @@ async fn main() -> Result<()> {
         Some(config.tracker_endpoint.as_str())
     };
 
+    // Determine auth: GitHub App or PAT.
+    let app_token_provider: Option<Arc<symphony_tracker::github::app_token::GitHubAppTokenProvider>> =
+        if let (Some(app_id), Some(installation_id), Some(key_path)) = (
+            config.github_app_id,
+            config.github_app_installation_id,
+            config.github_app_private_key_path.as_deref(),
+        ) {
+            let private_key = std::fs::read_to_string(key_path).map_err(|e| {
+                anyhow::anyhow!("failed to read GitHub App private key from {key_path}: {e}")
+            })?;
+            let app_config = symphony_tracker::github::app_token::GitHubAppConfig {
+                app_id,
+                installation_id,
+                private_key_pem: private_key,
+                api_endpoint: if config.tracker_endpoint.is_empty() {
+                    "https://api.github.com".to_string()
+                } else {
+                    config.tracker_endpoint.clone()
+                },
+            };
+            let provider =
+                symphony_tracker::github::app_token::GitHubAppTokenProvider::new(app_config)
+                    .map_err(|e| anyhow::anyhow!("failed to create GitHub App token provider: {e}"))?;
+            tracing::info!("using GitHub App authentication (app_id={app_id})");
+            Some(Arc::new(provider))
+        } else {
+            None
+        };
+
+    // Get the initial API token.
+    let api_token = if let Some(ref provider) = app_token_provider {
+        provider.get_token().await.map_err(|e| {
+            anyhow::anyhow!("failed to get GitHub App installation token: {e}")
+        })?
+    } else {
+        if config.tracker_api_key.is_empty() {
+            return Err(anyhow::anyhow!(
+                "either tracker.api_key or GitHub App config (app_id + installation_id + private_key_path) is required"
+            ));
+        }
+        config.tracker_api_key.clone()
+    };
+
     let github_client = symphony_tracker::github::client::GitHubClient::new(
-        &config.tracker_api_key,
+        &api_token,
         &config.tracker_project_slug,
         config.tracker_active_states.clone(),
         config.tracker_terminal_states.clone(),
@@ -84,6 +127,44 @@ async fn main() -> Result<()> {
 
     let tracker: Arc<dyn symphony_tracker::traits::IssueTracker> =
         Arc::new(github_client);
+
+    // If using GitHub App, set GH_TOKEN and GITHUB_TOKEN env vars so the
+    // agent process and hooks can use gh CLI and git push.
+    if let Some(ref provider) = app_token_provider {
+        let token = provider.get_token().await.map_err(|e| {
+            anyhow::anyhow!("failed to get GitHub App token for agent: {e}")
+        })?;
+        // Set env vars for child processes (hooks and codex agent).
+        // SAFETY: We are single-threaded at this point during startup.
+        unsafe {
+            std::env::set_var("GH_TOKEN", &token);
+            std::env::set_var("GITHUB_TOKEN", &token);
+        }
+        tracing::info!("set GH_TOKEN and GITHUB_TOKEN for agent subprocess");
+
+        // Spawn a background task to refresh the token every 30 minutes.
+        let refresh_provider = Arc::clone(provider);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1800));
+            loop {
+                interval.tick().await;
+                match refresh_provider.get_token().await {
+                    Ok(new_token) => {
+                        // SAFETY: env var mutation is the only way to pass
+                        // refreshed tokens to child processes.
+                        unsafe {
+                            std::env::set_var("GH_TOKEN", &new_token);
+                            std::env::set_var("GITHUB_TOKEN", &new_token);
+                        }
+                        tracing::info!("refreshed GitHub App token");
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "failed to refresh GitHub App token");
+                    }
+                }
+            }
+        });
+    }
 
     let workspace_manager = Arc::new(
         symphony_workspace::manager::WorkspaceManager::new(
