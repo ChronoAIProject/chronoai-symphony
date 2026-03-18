@@ -95,15 +95,13 @@ impl AgentRunner {
         policy
     }
 
-    /// Build the agent command with optional model and reasoning effort flags.
+    /// Build the Codex app-server command with optional config flags.
     ///
-    /// `--model` is standard across both Codex and Claude CLIs.
-    /// Reasoning effort is passed as a Codex config flag AND as an env var
-    /// `MODEL_REASONING_EFFORT` so any agent wrapper can read it.
+    /// Codex uses `--config key=value` for all settings (not `--model`).
     fn build_command(&self, base_command: &str) -> String {
         let mut cmd = base_command.to_string();
         if let Some(ref model) = self.profile.model {
-            cmd = format!("{cmd} --model {model}");
+            cmd = format!("{cmd} --config model=\"{model}\"");
         }
         if let Some(ref effort) = self.profile.reasoning_effort {
             cmd = format!("{cmd} --config model_reasoning_effort={effort}");
