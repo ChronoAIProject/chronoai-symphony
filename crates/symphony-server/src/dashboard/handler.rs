@@ -239,13 +239,17 @@ function stateBadge(st){
 function esc(s){if(!s)return"";let d=document.createElement("div");d.textContent=s;return d.innerHTML;}
 function copyText(text,btn){
   function done(){btn.textContent="Copied";setTimeout(()=>btn.textContent="Copy ID",1200);}
-  if(navigator.clipboard&&window.isSecureContext){
-    navigator.clipboard.writeText(text).then(done).catch(()=>fallback(text,done));
-  }else{fallback(text,done);}
-  function fallback(t,cb){
-    let ta=document.createElement("textarea");ta.value=t;ta.style.position="fixed";ta.style.opacity="0";
-    document.body.appendChild(ta);ta.select();document.execCommand("copy");document.body.removeChild(ta);cb();
+  function fallback(){
+    let ta=document.createElement("textarea");ta.value=text;ta.style.position="fixed";ta.style.left="-9999px";ta.style.opacity="0";
+    document.body.appendChild(ta);ta.focus();ta.select();
+    try{document.execCommand("copy");done();}catch(e){}
+    document.body.removeChild(ta);
   }
+  try{
+    if(navigator&&navigator.clipboard&&typeof navigator.clipboard.writeText==="function"&&window.isSecureContext){
+      navigator.clipboard.writeText(text).then(done).catch(fallback);
+    }else{fallback();}
+  }catch(e){fallback();}
 }
 
 let expandedActivities={};
