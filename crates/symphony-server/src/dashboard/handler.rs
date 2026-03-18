@@ -237,6 +237,16 @@ function stateBadge(st){
   return"state-badge";
 }
 function esc(s){if(!s)return"";let d=document.createElement("div");d.textContent=s;return d.innerHTML;}
+function copyText(text,btn){
+  function done(){btn.textContent="Copied";setTimeout(()=>btn.textContent="Copy ID",1200);}
+  if(navigator.clipboard&&window.isSecureContext){
+    navigator.clipboard.writeText(text).then(done).catch(()=>fallback(text,done));
+  }else{fallback(text,done);}
+  function fallback(t,cb){
+    let ta=document.createElement("textarea");ta.value=t;ta.style.position="fixed";ta.style.opacity="0";
+    document.body.appendChild(ta);ta.select();document.execCommand("copy");document.body.removeChild(ta);cb();
+  }
+}
 
 let expandedActivities={};
 let activityScrollPos={};
@@ -362,7 +372,7 @@ function render(data){
       }
       html+=`</div></td>
         <td><span class="${stateBadge(st)}">${esc(st)}</span></td>
-        <td>${e.session_id?`<button class="copy-btn" onclick="navigator.clipboard.writeText('${esc(e.session_id)}');this.textContent='Copied';setTimeout(()=>this.textContent='Copy ID',1200)">Copy ID</button>`:`<span class="muted">n/a</span>`}</td>
+        <td>${e.session_id?`<button class="copy-btn" onclick="copyText('${esc(e.session_id)}',this)">Copy ID</button>`:`<span class="muted">n/a</span>`}</td>
         <td>${rtLabel}</td>
         <td><div class="detail-stack"><span class="event-text" title="${esc(lastMsg)}">${lastMsg}</span>
           <span class="muted event-meta">${evMeta}${evAt?" &middot; "+esc(evAt):""}</span></div></td>
