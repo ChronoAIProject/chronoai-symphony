@@ -308,7 +308,7 @@ impl AgentRunner {
     fn build_claude_command(&self, max_turns: u32) -> String {
         let mut cmd = self.profile.command.clone();
         cmd = format!("{cmd} -p \"$SYMPHONY_PROMPT\"");
-        cmd = format!("{cmd} --output-format stream-json");
+        cmd = format!("{cmd} --output-format=stream-json");
         // Only skip permissions when approval_policy is "never" (default).
         // Other policies let Claude prompt for approval (not applicable in
         // headless mode, but avoids the dangerous flag when not intended).
