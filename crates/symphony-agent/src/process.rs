@@ -90,8 +90,16 @@ impl AgentProcess {
             .arg(&shell_command)
             .current_dir(cwd)
             .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null());
+            .stdout(std::process::Stdio::piped());
+
+        // When merging stderr (Codex), stderr is already in stdout via 2>&1.
+        // When not merging (Claude CLI), pipe stderr separately and log it
+        // so we can see errors.
+        if merge_stderr {
+            cmd.stderr(std::process::Stdio::null());
+        } else {
+            cmd.stderr(std::process::Stdio::piped());
+        }
 
         // Prepend wrapper bin dir to PATH if using token file.
         if let Some(ref wrapper) = wrapper_dir {
@@ -121,6 +129,20 @@ impl AgentProcess {
             .ok_or_else(|| SymphonyError::ResponseError {
                 detail: "failed to capture agent stdin".to_string(),
             })?;
+
+        // Drain stderr in a background task if piped (non-merged mode).
+        if !merge_stderr {
+            if let Some(stderr) = child.stderr.take() {
+                use tokio::io::AsyncBufReadExt;
+                tokio::spawn(async move {
+                    let reader = tokio::io::BufReader::new(stderr);
+                    let mut lines = reader.lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        debug!(target: "agent_stderr", "{}", line);
+                    }
+                });
+            }
+        }
 
         let pid = child.id();
         info!(pid = ?pid, "agent process launched");
