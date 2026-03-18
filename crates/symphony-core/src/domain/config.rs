@@ -115,9 +115,15 @@ impl ServiceConfig {
                 ]
             });
 
-        // -- github app --
-        let github_app_id = get_u64(&tracker, "app_id");
-        let github_app_installation_id = get_u64(&tracker, "installation_id");
+        // -- github app (all fields support $VAR env references) --
+        let github_app_id = get_str(&tracker, "app_id")
+            .map(|v| resolve_env_var(&v))
+            .transpose()?
+            .and_then(|v| v.parse::<u64>().ok());
+        let github_app_installation_id = get_str(&tracker, "installation_id")
+            .map(|v| resolve_env_var(&v))
+            .transpose()?
+            .and_then(|v| v.parse::<u64>().ok());
         let github_app_private_key_path = get_str(&tracker, "private_key_path")
             .map(|v| resolve_env_var(&v))
             .transpose()?;

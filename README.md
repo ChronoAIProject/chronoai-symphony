@@ -155,9 +155,9 @@ tracker:
   api_key: $GITHUB_TOKEN               # Supports $VAR env references.
 
   # Auth option 2: GitHub App (commits/PRs show as "app-name[bot]")
-  # app_id: 123456                      # App ID from GitHub App settings.
-  # installation_id: 789012             # From the installation URL.
-  # private_key_path: /path/to/app.pem  # RSA private key (.pem file).
+  # app_id: $GITHUB_APP_ID             # Supports $VAR env references.
+  # installation_id: $GITHUB_APP_INSTALLATION_ID
+  # private_key_path: $GITHUB_APP_PRIVATE_KEY_PATH
   active_states:                        # Optional. Default: Todo, In Progress.
     - Todo
     - In Progress
@@ -494,13 +494,18 @@ Actions appear as `your-app-name[bot]` with a bot badge. No spare email needed.
 5. Install the app on your repository
 6. Note the **installation ID** from the URL: `github.com/settings/installations/{id}`
 
+```bash
+export GITHUB_APP_ID=123456
+export GITHUB_APP_INSTALLATION_ID=789012
+export GITHUB_APP_PRIVATE_KEY_PATH=/path/to/app.pem
+```
+
 ```yaml
-# WORKFLOW.md
+# WORKFLOW.md (safe to commit - no secrets)
 tracker:
-  app_id: 123456                      # From app settings page
-  installation_id: 789012             # From installation URL
-  private_key_path: /path/to/app.pem  # Downloaded .pem file
-  # api_key is not needed with app auth
+  app_id: $GITHUB_APP_ID
+  installation_id: $GITHUB_APP_INSTALLATION_ID
+  private_key_path: $GITHUB_APP_PRIVATE_KEY_PATH
 ```
 
 Symphony automatically:
