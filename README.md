@@ -218,6 +218,7 @@ agents:
     agent_type: claude-cli             # Native Claude Code CLI integration.
     command: claude                    # Official CLI, no wrapper needed.
     model: claude-sonnet-4-6           # Passed as --model flag.
+    reasoning_effort: high             # Passed as --effort flag. low/medium/high/max.
     max_turns: 20                      # Passed as --max-turns flag.
     network_access: true
     turn_timeout_ms: 7200000           # 2 hours for full Claude session.
@@ -492,16 +493,24 @@ agents:
   codex:
     command: codex app-server
     model: gpt-5.3-codex
-    reasoning_effort: xhigh
+    reasoning_effort: xhigh           # Codex: -c model_reasoning_effort=xhigh
   claude:
-    agent_type: claude-cli             # Native Claude Code CLI
-    command: claude                    # Official CLI, no wrapper needed
+    agent_type: claude-cli
+    command: claude
     model: claude-sonnet-4-6
+    reasoning_effort: high             # Claude: --effort high (low/medium/high/max)
     max_turns: 20
 
 agent:
   default: codex    # Issues without a label use Codex
 ```
+
+`reasoning_effort` maps to the right flag for each agent:
+
+| Agent | Flag passed |
+|-------|-------------|
+| Codex | `-c model_reasoning_effort=<value>` |
+| Claude Code | `--effort <value>` (low, medium, high, max) |
 
 To use Claude for a specific issue, add the label `agent:claude` to the GitHub issue. Both agents can run in parallel on different issues simultaneously.
 
@@ -544,6 +553,8 @@ The implementation agent moves the issue to `code-review` when done. Symphony au
 | Turn management | Symphony manages multi-turn loop | Claude CLI manages internally via `--max-turns` |
 | Approval handling | Symphony's approval queue UI | `--dangerously-skip-permissions` (auto-approve) |
 | Prompt delivery | JSON-RPC `turn/start` message | `$SYMPHONY_PROMPT` env var |
+| Model flag | `-c model=<value>` | `--model <value>` |
+| Reasoning effort | `-c model_reasoning_effort=<value>` | `--effort <value>` (low/medium/high/max) |
 
 ## Authentication
 

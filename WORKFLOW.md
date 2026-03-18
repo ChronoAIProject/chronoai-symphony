@@ -64,6 +64,7 @@ agents:
   #   agent_type: claude-cli             # Uses official Claude Code CLI directly.
   #   command: claude                    # Official CLI, no third-party wrapper needed.
   #   model: claude-sonnet-4-6
+  #   reasoning_effort: high             # --effort flag. low, medium, high, max.
   #   max_turns: 20
   #   network_access: true
   #   turn_timeout_ms: 7200000           # 2 hours for full session.
