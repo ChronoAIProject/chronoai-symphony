@@ -466,18 +466,14 @@ impl Orchestrator {
         // Clean up cancellation sender.
         self.cancel_senders.remove(issue_id);
 
-        // Update totals from the running entry before removing it.
+        // Persist the running entry's full token counts into the
+        // cumulative totals. The snapshot adds running entries' tokens
+        // live, so we store the FULL values here (not deltas) to ensure
+        // the total doesn't drop when the entry is removed.
         if let Some(entry) = self.state.running.get(issue_id) {
-            let delta_input =
-                entry.codex_input_tokens - entry.last_reported_input_tokens;
-            let delta_output =
-                entry.codex_output_tokens - entry.last_reported_output_tokens;
-            let delta_total =
-                entry.codex_total_tokens - entry.last_reported_total_tokens;
-
-            self.state.codex_totals.input_tokens += delta_input;
-            self.state.codex_totals.output_tokens += delta_output;
-            self.state.codex_totals.total_tokens += delta_total;
+            self.state.codex_totals.input_tokens += entry.codex_input_tokens;
+            self.state.codex_totals.output_tokens += entry.codex_output_tokens;
+            self.state.codex_totals.total_tokens += entry.codex_total_tokens;
 
             let elapsed = (Utc::now() - entry.started_at)
                 .num_milliseconds()
