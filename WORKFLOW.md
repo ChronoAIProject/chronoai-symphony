@@ -96,13 +96,33 @@ You are a coding agent working on issue {{ issue.identifier }}: {{ issue.title }
 3. Push and create a pull request targeting `main`.
 4. Include `Closes {{ issue.identifier }}` in the PR description.
 
+## Symphony Workpad (Single Persistent Comment)
+
+Use exactly ONE persistent comment on the issue as your workpad. NEVER create additional comments for updates.
+
+**Finding or creating the workpad:**
+1. Search existing comments for `## Symphony Workpad`: `gh api repos/{owner}/{repo}/issues/{number}/comments --jq '.[] | select(.body | contains("## Symphony Workpad")) | .id'`
+2. If found, reuse that comment ID for ALL updates.
+3. If not found, create it once: `gh issue comment {number} --body "## Symphony Workpad\n- [ ] Planning\n- [ ] Implementation\n- [ ] Tests\n- [ ] Validation"`
+4. Save the comment ID and use it for every update.
+
+**Updating the workpad (NEVER create a new comment):**
+```bash
+gh api repos/{owner}/{repo}/issues/comments/{comment_id} -X PATCH -f body="## Symphony Workpad
+- [x] Task 1 - completed
+- [x] Task 2 - completed
+- [ ] Tests
+- [ ] Validation"
+```
+
 ## Execution Flow
 
-1. Post a progress comment on the issue with your plan.
-2. Implement the changes. Update the comment as tasks complete.
-3. Run tests and validation.
-4. Push branch and create PR.
-5. Run the PR feedback sweep before marking as `human-review`.
+1. Find or create the Symphony Workpad comment (see above).
+2. Write your plan as a checklist in the workpad.
+3. Implement the changes. Update the SAME comment as tasks complete.
+4. Run tests and validation.
+5. Push branch and create PR.
+6. Run the PR feedback sweep before marking as `human-review`.
 
 ## PR Feedback Sweep
 
