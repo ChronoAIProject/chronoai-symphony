@@ -1,14 +1,28 @@
 # chronoai-symphony
 
-A Rust implementation of the [Symphony Service Specification](https://github.com/openai/symphony/blob/main/SPEC.md) that orchestrates coding agents against **GitHub Issues**.
+A multi-agent coding orchestrator built on the [Symphony Service Specification](https://github.com/openai/symphony/blob/main/SPEC.md), extended with multi-agent pipelines, native Claude Code support, and a live operations dashboard.
 
-Symphony is a long-running automation service that:
+Symphony turns GitHub Issues into autonomous coding sessions. It polls your repository, dispatches coding agents (OpenAI Codex or Claude Code) to work on issues in isolated workspaces, manages the full lifecycle from implementation through code review to human approval, and provides real-time observability through a web dashboard.
 
-- Polls GitHub Issues on a fixed cadence
-- Creates isolated per-issue workspaces
-- Runs coding agent sessions (Codex app-server compatible) for each issue
-- Manages retries with exponential backoff
-- Provides an HTTP dashboard and JSON API for observability
+**Key features beyond the Symphony spec:**
+
+- **Multi-agent pipelines** - Different agents for different workflow phases (e.g., Codex implements, Claude reviews)
+- **Native Claude Code CLI** - Direct integration with `claude -p`, no third-party wrappers
+- **Custom pipeline stages** - Define any workflow state with its own agent, role, and prompt
+- **Per-stage prompts** - Each pipeline stage can have its own prompt template
+- **Live dashboard** - Real-time activity feed, token usage, rate limits, approval queue
+- **GitHub App auth** - Bot identity for commits/PRs with auto-refreshing tokens
+- **PR review cycle** - Automated code review → human review → rework loop
+
+**Core capabilities:**
+
+- Polls GitHub Issues and dispatches agents based on labels and state
+- Creates isolated per-issue workspaces with feature branches
+- Runs multiple agents in parallel on different issues
+- Manages retries with exponential backoff and stall detection
+- Streams agent activity to a web dashboard with approve/deny controls
+- Tracks token usage and rate limits across both Codex and Claude
+- Hot-reloads WORKFLOW.md changes without restart
 
 ## Agent-Assisted Setup
 
