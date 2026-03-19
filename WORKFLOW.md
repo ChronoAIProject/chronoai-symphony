@@ -81,6 +81,27 @@ agents:
   #   network_access: true
   #   turn_timeout_ms: 7200000           # 2 hours for full session.
 
+# Custom pipeline stages. Define per-state agent, role, prompt override,
+# and transition targets. When set, these take priority over agent.by_state.
+# pipeline:
+#   stages:
+#     - state: in-progress
+#       agent: codex
+#       role: implementer
+#       transition_to: code-review
+#     - state: code-review
+#       agent: claude
+#       role: reviewer
+#       transition_to: human-review
+#       reject_to: rework
+#       # prompt: "Review {{ issue.identifier }}. {{ default_prompt }}"
+#     - state: rework
+#       agent: codex
+#       role: implementer
+#       transition_to: code-review
+#     - state: human-review
+#       agent: none
+
 server:
   port: 8080
 ---

@@ -948,6 +948,7 @@ mod tests {
             codex_reasoning_effort: None,
             codex_network_access: true,
             codex_auto_merge: false,
+            pipeline_stages: vec![],
         }
     }
 

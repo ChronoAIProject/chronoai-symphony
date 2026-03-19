@@ -67,20 +67,30 @@ pub fn is_dispatch_eligible(
         return false;
     }
 
-    // Skip "handoff" states where the agent should not work.
-    // These are states where the agent has finished and is waiting for
-    // human action (review, merge, etc.). The agent should only be
-    // re-dispatched when the human moves it to "Rework" or back to an
-    // implementation state.
-    let handoff_states = ["human review", "human-review", "humanreview",
-                          "merging", "blocked"];
-    if handoff_states.iter().any(|h| normalize_state(h) == normalized_state) {
+    // If pipeline is configured, check for agent=none stages.
+    if config.is_no_agent_state_by_name(&issue.state) {
         debug!(
             issue_id = %issue.id,
             state = %issue.state,
-            "skipping issue: in handoff state (waiting for human)"
+            "skipping issue: pipeline stage has agent=none"
         );
         return false;
+    }
+
+    // Legacy fallback: hardcoded handoff states when no pipeline configured.
+    if config.pipeline_stages.is_empty() {
+        let handoff_states = [
+            "human review", "human-review", "humanreview",
+            "merging", "blocked",
+        ];
+        if handoff_states.iter().any(|h| normalize_state(h) == normalized_state) {
+            debug!(
+                issue_id = %issue.id,
+                state = %issue.state,
+                "skipping issue: in handoff state (waiting for human)"
+            );
+            return false;
+        }
     }
 
     // State must NOT be in terminal_states.
@@ -260,6 +270,7 @@ mod tests {
             codex_reasoning_effort: None,
             codex_network_access: true,
             codex_auto_merge: false,
+            pipeline_stages: vec![],
         }
     }
 

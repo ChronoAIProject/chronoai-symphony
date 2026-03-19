@@ -67,6 +67,21 @@ pub struct AgentProfileConfig {
     pub max_turns: Option<u32>,
 }
 
+/// A single stage in a customizable pipeline.
+///
+/// Maps an issue state to an agent profile with optional role, prompt override,
+/// and transition targets. When `agent` is `"none"`, the stage is a handoff
+/// point where no agent runs (e.g., waiting for human review).
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct PipelineStage {
+    pub state: String,
+    pub agent: String,
+    pub role: Option<String>,
+    pub prompt: Option<String>,
+    pub transition_to: Option<String>,
+    pub reject_to: Option<String>,
+}
+
 /// Fully resolved service configuration with typed fields and applied defaults.
 ///
 /// Built from the YAML front matter of a workflow definition. All environment
@@ -129,6 +144,9 @@ pub struct ServiceConfig {
     pub codex_reasoning_effort: Option<String>,
     pub codex_network_access: bool,
     pub codex_auto_merge: bool,
+
+    // -- pipeline stages (custom pipeline) --
+    pub pipeline_stages: Vec<PipelineStage>,
 
     // -- server --
     pub server_port: Option<u16>,
@@ -275,6 +293,9 @@ impl ServiceConfig {
         let codex_reasoning_effort = default_profile.reasoning_effort.clone();
         let codex_network_access = default_profile.network_access;
 
+        // -- pipeline stages --
+        let pipeline_stages = parse_pipeline_stages(root);
+
         // -- server --
         let server_port = get_u64(&server, "port").map(|v| v as u16);
 
@@ -312,6 +333,7 @@ impl ServiceConfig {
             codex_reasoning_effort,
             codex_network_access,
             codex_auto_merge,
+            pipeline_stages,
             server_port,
         })
     }
@@ -321,15 +343,56 @@ impl ServiceConfig {
         self.agent_profiles.get(name)
     }
 
+    /// Resolve the pipeline stage for an issue based on its state.
+    ///
+    /// Returns `None` if no pipeline is configured or no stage matches.
+    pub fn resolve_stage_for_issue(&self, issue: &Issue) -> Option<&PipelineStage> {
+        if self.pipeline_stages.is_empty() {
+            return None;
+        }
+        let normalize = |s: &str| -> String {
+            s.to_lowercase().replace('-', " ").replace('_', " ")
+        };
+        let issue_state_norm = normalize(&issue.state);
+        self.pipeline_stages.iter().find(|stage| {
+            normalize(&stage.state) == issue_state_norm
+        })
+    }
+
+    /// Check whether a given state name maps to a pipeline stage with
+    /// `agent: none`, meaning no agent should run for that state.
+    pub fn is_no_agent_state_by_name(&self, state: &str) -> bool {
+        if self.pipeline_stages.is_empty() {
+            return false;
+        }
+        let normalize = |s: &str| -> String {
+            s.to_lowercase().replace('-', " ").replace('_', " ")
+        };
+        let normalized = normalize(state);
+        self.pipeline_stages.iter().any(|stage| {
+            normalize(&stage.state) == normalized && stage.agent == "none"
+        })
+    }
+
     /// Resolve which agent profile to use for a given issue.
     ///
     /// Priority order:
+    /// 0. Pipeline stage agent (if pipeline is configured)
     /// 1. `agent_by_state` mapping (e.g., code-review -> claude)
     /// 2. Issue label prefixed with `agent:` (e.g., `agent:claude`)
     /// 3. Configured default agent
     pub fn resolve_agent_for_issue(&self, issue: &Issue) -> &AgentProfileConfig {
+        // 0. Check pipeline stages first.
+        if let Some(stage) = self.resolve_stage_for_issue(issue) {
+            if stage.agent != "none" {
+                if let Some(profile) = self.agent_profiles.get(&stage.agent) {
+                    return profile;
+                }
+            }
+        }
+
         // 1. Check state-based agent mapping.
-        // Normalize both sides: lowercase, hyphens/underscores → spaces.
+        // Normalize both sides: lowercase, hyphens/underscores -> spaces.
         let normalize = |s: &str| -> String {
             s.to_lowercase().replace('-', " ").replace('_', " ")
         };
@@ -448,6 +511,46 @@ fn parse_agent_profiles(
         let mut profiles = HashMap::new();
         profiles.insert("codex".to_owned(), profile);
         Ok((profiles, "codex".to_owned()))
+    }
+}
+
+/// Parse custom pipeline stages from the `pipeline:` YAML section.
+///
+/// Expected shape:
+/// ```yaml
+/// pipeline:
+///   stages:
+///     - state: in-progress
+///       agent: codex
+///       role: implementer
+///     - state: code-review
+///       agent: claude
+///       role: reviewer
+///     - state: human-review
+///       agent: none
+/// ```
+fn parse_pipeline_stages(root: &Mapping) -> Vec<PipelineStage> {
+    let pipeline = get_value(root, "pipeline").and_then(|v| v.as_mapping());
+    let stages = pipeline
+        .and_then(|p| get_value(p, "stages"))
+        .and_then(|v| v.as_sequence());
+    match stages {
+        Some(seq) => seq
+            .iter()
+            .filter_map(|item| {
+                let m = item.as_mapping()?;
+                Some(PipelineStage {
+                    state: get_str(m, "state")?.to_lowercase(),
+                    agent: get_str(m, "agent")
+                        .unwrap_or_else(|| "codex".to_owned()),
+                    role: get_str(m, "role"),
+                    prompt: get_str(m, "prompt"),
+                    transition_to: get_str(m, "transition_to"),
+                    reject_to: get_str(m, "reject_to"),
+                })
+            })
+            .collect(),
+        None => vec![],
     }
 }
 
@@ -858,5 +961,219 @@ agent:
 
         let profile = cfg.resolve_agent_for_issue(&issue);
         assert_eq!(profile.command, "codex app-server");
+    }
+
+    // -----------------------------------------------------------------------
+    // Pipeline stage tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_pipeline_stages_absent() {
+        unsafe { env::set_var("TEST_API_KEY_P1", "key") };
+        let wf = make_workflow(
+            r#"
+tracker:
+  kind: github
+  api_key: $TEST_API_KEY_P1
+  project_slug: owner/repo
+"#,
+        );
+        let cfg = ServiceConfig::from_workflow(&wf).unwrap();
+        assert!(cfg.pipeline_stages.is_empty());
+    }
+
+    #[test]
+    fn parse_pipeline_stages_basic() {
+        unsafe { env::set_var("TEST_API_KEY_P2", "key") };
+        let wf = make_workflow(
+            r#"
+tracker:
+  kind: github
+  api_key: $TEST_API_KEY_P2
+  project_slug: owner/repo
+pipeline:
+  stages:
+    - state: In-Progress
+      agent: codex
+      role: implementer
+      transition_to: code-review
+    - state: code-review
+      agent: claude
+      role: reviewer
+      reject_to: rework
+    - state: human-review
+      agent: none
+"#,
+        );
+        let cfg = ServiceConfig::from_workflow(&wf).unwrap();
+        assert_eq!(cfg.pipeline_stages.len(), 3);
+
+        assert_eq!(cfg.pipeline_stages[0].state, "in-progress");
+        assert_eq!(cfg.pipeline_stages[0].agent, "codex");
+        assert_eq!(cfg.pipeline_stages[0].role.as_deref(), Some("implementer"));
+        assert_eq!(
+            cfg.pipeline_stages[0].transition_to.as_deref(),
+            Some("code-review")
+        );
+
+        assert_eq!(cfg.pipeline_stages[1].state, "code-review");
+        assert_eq!(cfg.pipeline_stages[1].agent, "claude");
+        assert_eq!(cfg.pipeline_stages[1].role.as_deref(), Some("reviewer"));
+        assert_eq!(
+            cfg.pipeline_stages[1].reject_to.as_deref(),
+            Some("rework")
+        );
+
+        assert_eq!(cfg.pipeline_stages[2].state, "human-review");
+        assert_eq!(cfg.pipeline_stages[2].agent, "none");
+    }
+
+    #[test]
+    fn resolve_stage_for_issue_matches() {
+        unsafe { env::set_var("TEST_API_KEY_P3", "key") };
+        let wf = make_workflow(
+            r#"
+tracker:
+  kind: github
+  api_key: $TEST_API_KEY_P3
+  project_slug: owner/repo
+pipeline:
+  stages:
+    - state: in-progress
+      agent: codex
+      role: implementer
+    - state: code-review
+      agent: claude
+      role: reviewer
+"#,
+        );
+        let cfg = ServiceConfig::from_workflow(&wf).unwrap();
+
+        let issue = Issue {
+            id: "10".to_string(),
+            identifier: "#10".to_string(),
+            title: "Test".to_string(),
+            description: None,
+            priority: None,
+            state: "In-Progress".to_string(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+
+        let stage = cfg.resolve_stage_for_issue(&issue);
+        assert!(stage.is_some());
+        let s = stage.unwrap();
+        assert_eq!(s.agent, "codex");
+        assert_eq!(s.role.as_deref(), Some("implementer"));
+    }
+
+    #[test]
+    fn resolve_stage_for_issue_no_match() {
+        unsafe { env::set_var("TEST_API_KEY_P4", "key") };
+        let wf = make_workflow(
+            r#"
+tracker:
+  kind: github
+  api_key: $TEST_API_KEY_P4
+  project_slug: owner/repo
+pipeline:
+  stages:
+    - state: in-progress
+      agent: codex
+"#,
+        );
+        let cfg = ServiceConfig::from_workflow(&wf).unwrap();
+
+        let issue = Issue {
+            id: "11".to_string(),
+            identifier: "#11".to_string(),
+            title: "Test".to_string(),
+            description: None,
+            priority: None,
+            state: "Todo".to_string(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+
+        assert!(cfg.resolve_stage_for_issue(&issue).is_none());
+    }
+
+    #[test]
+    fn is_no_agent_state_true() {
+        unsafe { env::set_var("TEST_API_KEY_P5", "key") };
+        let wf = make_workflow(
+            r#"
+tracker:
+  kind: github
+  api_key: $TEST_API_KEY_P5
+  project_slug: owner/repo
+pipeline:
+  stages:
+    - state: human-review
+      agent: none
+    - state: in-progress
+      agent: codex
+"#,
+        );
+        let cfg = ServiceConfig::from_workflow(&wf).unwrap();
+        assert!(cfg.is_no_agent_state_by_name("Human-Review"));
+        assert!(cfg.is_no_agent_state_by_name("human_review"));
+        assert!(!cfg.is_no_agent_state_by_name("in-progress"));
+        assert!(!cfg.is_no_agent_state_by_name("unknown"));
+    }
+
+    #[test]
+    fn pipeline_agent_priority() {
+        unsafe { env::set_var("TEST_API_KEY_P6", "key") };
+        let wf = make_workflow(
+            r#"
+tracker:
+  kind: github
+  api_key: $TEST_API_KEY_P6
+  project_slug: owner/repo
+agents:
+  codex:
+    command: codex app-server
+  claude:
+    command: claude-app-server
+agent:
+  default: codex
+  by_state:
+    code-review: codex
+pipeline:
+  stages:
+    - state: code-review
+      agent: claude
+      role: reviewer
+"#,
+        );
+        let cfg = ServiceConfig::from_workflow(&wf).unwrap();
+
+        let issue = Issue {
+            id: "12".to_string(),
+            identifier: "#12".to_string(),
+            title: "Test".to_string(),
+            description: None,
+            priority: None,
+            state: "Code-Review".to_string(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+
+        // Pipeline stage should take priority over agent_by_state.
+        let profile = cfg.resolve_agent_for_issue(&issue);
+        assert_eq!(profile.command, "claude-app-server");
     }
 }

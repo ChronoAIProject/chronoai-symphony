@@ -12,7 +12,7 @@ use symphony_agent::runner::AgentRunner;
 use symphony_core::domain::{AgentType, Issue, ServiceConfig};
 use symphony_core::identifiers::normalize_state;
 use symphony_tracker::traits::IssueTracker;
-use symphony_workflow::template::render_prompt;
+use symphony_workflow::template::{render_prompt, render_prompt_with_stage, StageContext};
 use symphony_workspace::manager::WorkspaceManager;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -88,18 +88,48 @@ pub async fn run_worker(
     };
     let workspace_path = workspace.path;
 
-    // Step 2: Render prompt template with issue data.
-    let rendered_prompt = match render_prompt(&prompt_template, &issue, attempt) {
-        Ok(p) => {
-            info!(issue_id = %issue_id, prompt_len = p.len(), "prompt rendered");
-            p
-        }
-        Err(e) => {
-            error!(issue_id = %issue_id, error = %e, "failed to render prompt template");
-            return WorkerResult {
-                issue_id,
-                exit_reason: WorkerExitReason::Abnormal(format!("prompt render failed: {e}")),
-            };
+    // Step 2: Render prompt template with issue data and optional stage context.
+    let stage = config.resolve_stage_for_issue(&issue);
+    let rendered_prompt = {
+        let result = if let Some(s) = &stage {
+            if let Some(ref stage_prompt) = s.prompt {
+                // Two-pass: render default prompt first, then render stage
+                // prompt with the default prompt available as {{ default_prompt }}.
+                let default_rendered = render_prompt(&prompt_template, &issue, attempt)
+                    .unwrap_or_default();
+                let ctx = StageContext {
+                    role: s.role.clone(),
+                    transition_to: s.transition_to.clone(),
+                    reject_to: s.reject_to.clone(),
+                    default_prompt: default_rendered,
+                };
+                render_prompt_with_stage(stage_prompt, &issue, attempt, Some(&ctx))
+            } else {
+                // No custom prompt, but add stage vars to default prompt.
+                let ctx = StageContext {
+                    role: s.role.clone(),
+                    transition_to: s.transition_to.clone(),
+                    reject_to: s.reject_to.clone(),
+                    default_prompt: String::new(),
+                };
+                render_prompt_with_stage(&prompt_template, &issue, attempt, Some(&ctx))
+            }
+        } else {
+            render_prompt(&prompt_template, &issue, attempt)
+        };
+
+        match result {
+            Ok(p) => {
+                info!(issue_id = %issue_id, prompt_len = p.len(), "prompt rendered");
+                p
+            }
+            Err(e) => {
+                error!(issue_id = %issue_id, error = %e, "failed to render prompt template");
+                return WorkerResult {
+                    issue_id,
+                    exit_reason: WorkerExitReason::Abnormal(format!("prompt render failed: {e}")),
+                };
+            }
         }
     };
 
@@ -395,14 +425,19 @@ async fn run_codex_worker(
                             break;
                         }
 
-                        let handoff_states = [
-                            "human review", "human-review", "humanreview",
-                            "code review", "code-review", "codereview",
-                            "merging", "blocked",
-                        ];
-                        let is_handoff = handoff_states
-                            .iter()
-                            .any(|h| normalize_state(h) == normalized);
+                        let is_handoff = if config.pipeline_stages.is_empty() {
+                            // Legacy hardcoded list.
+                            let handoff_states = [
+                                "human review", "human-review", "humanreview",
+                                "code review", "code-review", "codereview",
+                                "merging", "blocked",
+                            ];
+                            handoff_states
+                                .iter()
+                                .any(|h| normalize_state(h) == normalized)
+                        } else {
+                            config.is_no_agent_state_by_name(&updated.state)
+                        };
 
                         if is_handoff {
                             info!(
