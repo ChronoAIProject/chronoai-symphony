@@ -81,32 +81,52 @@ agents:
   #   network_access: true
   #   turn_timeout_ms: 7200000           # 2 hours for full session.
 
-# Custom pipeline stages. Define per-state agent, role, prompt override,
-# and transition targets. When set, these take priority over agent.by_state.
+# Custom pipeline stages (optional). Define per-state agent, role, prompt,
+# and transitions. When set, these take priority over agent.by_state.
+#
+# Prompt behavior:
+# - No `prompt` on stage → uses the WORKFLOW.md body below with stage vars added
+# - `prompt` on stage → REPLACES the body. Use {{ default_prompt }} to include it.
+# - Available vars: {{ stage.role }}, {{ stage.transition_to }}, {{ stage.reject_to }}
+#
 # pipeline:
 #   stages:
+#     - state: architect                    # Custom state - any name works
+#       agent: claude
+#       role: architect
+#       prompt: |
+#         You are a software architect. Analyze {{ issue.identifier }}: {{ issue.title }}.
+#         Create a detailed implementation plan. Do NOT write code.
+#         {{ issue.description }}
+#         Post the plan as a comment and add label `in-progress`.
+#       transition_to: in-progress
 #     - state: in-progress
 #       agent: codex
-#       role: implementer
+#       role: implementer                   # Available as {{ stage.role }} in prompt
 #       transition_to: code-review
 #     - state: code-review
 #       agent: claude
 #       role: reviewer
+#       prompt: |                           # Custom prompt REPLACES the body below
+#         You are a code review agent for {{ issue.identifier }}: {{ issue.title }}.
+#         Review the PR: `gh pr diff`
+#         Check code quality, tests, security, and architecture.
+#         If approved: add label `human-review`, remove `code-review`.
+#         If needs work: post review comments, add label `rework`, remove `code-review`.
 #       transition_to: human-review
 #       reject_to: rework
-#       # prompt: "Review {{ issue.identifier }}. {{ default_prompt }}"
 #     - state: rework
 #       agent: codex
 #       role: implementer
 #       transition_to: code-review
 #     - state: human-review
-#       agent: none
+#       agent: none                         # No agent runs - handoff to human
 
 server:
   port: 8080
 ---
 
-You are a coding agent working on issue {{ issue.identifier }}: {{ issue.title }}.
+You are a {% if stage.role %}{{ stage.role }}{% else %}coding agent{% endif %} working on issue {{ issue.identifier }}: {{ issue.title }}.
 
 ## Issue Details
 

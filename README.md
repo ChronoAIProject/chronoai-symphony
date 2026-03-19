@@ -246,10 +246,21 @@ agents:
     network_access: true
     turn_timeout_ms: 7200000           # 2 hours for full Claude session.
 
-# Legacy single-agent format (still supported):
-# codex:
-#   command: codex app-server
-#   model: gpt-5.3-codex
+# Optional: custom pipeline stages (replaces agent.by_state when set)
+# pipeline:
+#   stages:
+#     - state: in-progress               # Stage per state.
+#       agent: codex                     # Agent profile name, or "none".
+#       role: implementer               # {{ stage.role }} in prompts.
+#       transition_to: code-review      # {{ stage.transition_to }}.
+#     - state: code-review
+#       agent: claude
+#       role: reviewer
+#       prompt: "Custom prompt..."       # Replaces WORKFLOW.md body.
+#       transition_to: human-review
+#       reject_to: rework               # {{ stage.reject_to }}.
+#     - state: human-review
+#       agent: none                      # No agent dispatched.
 
 server:
   port: 8080                            # Enable HTTP dashboard on this port.
@@ -566,6 +577,61 @@ Todo → In Progress (Codex) → Code Review (Claude) → Human Review → Done
 ```
 
 The implementation agent moves the issue to `code-review` when done. Symphony automatically switches to the Claude agent for review. Claude reviews the PR and either approves (→ `human-review`) or requests changes (→ `rework`), where Codex picks it up again.
+
+### Custom pipeline stages (advanced)
+
+For full control, use the `pipeline:` section. Each stage defines an agent, role, optional prompt override, and transitions. This replaces `agent.by_state`:
+
+```yaml
+pipeline:
+  stages:
+    - state: architect                    # Custom state - any name
+      agent: claude
+      role: architect
+      prompt: |                           # Custom prompt REPLACES the WORKFLOW.md body
+        You are a software architect. Analyze {{ issue.identifier }}.
+        Create an implementation plan. Do NOT write code.
+        {{ issue.description }}
+      transition_to: in-progress
+
+    - state: in-progress
+      agent: codex
+      role: implementer                   # Available as {{ stage.role }} in the prompt
+      transition_to: code-review
+
+    - state: code-review
+      agent: claude
+      role: reviewer
+      prompt: |                           # Different prompt for review phase
+        Review PR for {{ issue.identifier }}: `gh pr diff`
+        If good: add label `human-review`. If not: add label `rework`.
+      transition_to: human-review
+      reject_to: rework
+
+    - state: rework
+      agent: codex
+      role: implementer
+      transition_to: code-review
+
+    - state: human-review
+      agent: none                         # No agent - handoff to human
+```
+
+**Prompt behavior:**
+
+| Stage config | What happens |
+|---|---|
+| No `prompt` field | Uses the WORKFLOW.md body with `{{ stage.role }}`, `{{ stage.transition_to }}`, `{{ stage.reject_to }}` injected |
+| Has `prompt` field | Stage prompt **replaces** the WORKFLOW.md body. Use `{{ default_prompt }}` to include the original body |
+
+**Template variables available in all prompts:**
+
+| Variable | Description |
+|---|---|
+| `{{ stage.role }}` | Role label (e.g., "implementer", "reviewer", "architect") |
+| `{{ stage.transition_to }}` | Next state on success |
+| `{{ stage.reject_to }}` | Next state on rejection |
+| `{{ default_prompt }}` | The rendered WORKFLOW.md body (only in stage prompt overrides) |
 
 **Key differences between agent types:**
 
