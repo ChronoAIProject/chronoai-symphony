@@ -93,6 +93,10 @@ pub struct ServiceConfig {
     // -- workspace --
     pub workspace_root: PathBuf,
 
+    // -- git --
+    pub git_user_name: Option<String>,
+    pub git_user_email: Option<String>,
+
     // -- hooks --
     pub hooks: HooksConfig,
 
@@ -141,6 +145,7 @@ impl ServiceConfig {
         let tracker = get_mapping(root, "tracker");
         let polling = get_mapping(root, "polling");
         let workspace = get_mapping(root, "workspace");
+        let git = get_mapping(root, "git");
         let hooks_map = get_mapping(root, "hooks");
         let agent = get_mapping(root, "agent");
         let codex = get_mapping(root, "codex");
@@ -205,6 +210,11 @@ impl ServiceConfig {
                 p.push("symphony_workspaces");
                 p
             });
+
+        // -- git --
+        let git_user_name = get_str(&git, "user_name")
+            .or_else(|| get_str(&git, "name"));
+        let git_user_email = get_str(&git, "email");
 
         // -- hooks --
         let hooks = HooksConfig {
@@ -280,6 +290,8 @@ impl ServiceConfig {
             github_app_private_key_path,
             polling_interval_ms,
             workspace_root,
+            git_user_name,
+            git_user_email,
             hooks,
             agent_max_concurrent,
             agent_max_turns,

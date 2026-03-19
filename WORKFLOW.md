@@ -25,6 +25,10 @@ polling:
 workspace:
   root: /tmp/symphony_workspaces
 
+git:
+  user_name: symphony-bot                # Git author for agent commits.
+  # email: symphony@your-org.com         # Optional. Defaults to git's default.
+
 hooks:
   after_create: |
     git clone --depth 1 https://github.com/your-org/your-repo.git .

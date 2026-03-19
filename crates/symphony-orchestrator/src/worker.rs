@@ -103,6 +103,22 @@ pub async fn run_worker(
         }
     };
 
+    // Step 2b: Set git identity in the workspace if configured.
+    if let Some(ref name) = config.git_user_name {
+        let _ = tokio::process::Command::new("git")
+            .args(["config", "user.name", name])
+            .current_dir(&workspace_path)
+            .output()
+            .await;
+    }
+    if let Some(ref email) = config.git_user_email {
+        let _ = tokio::process::Command::new("git")
+            .args(["config", "user.email", email])
+            .current_dir(&workspace_path)
+            .output()
+            .await;
+    }
+
     // Step 3: Run before_run hook.
     if let Err(e) = workspace_manager.run_before_run_hook(&workspace_path, Some(&issue_id), Some(&identifier)).await {
         error!(issue_id = %issue_id, error = %e, "before_run hook failed");

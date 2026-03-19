@@ -134,6 +134,8 @@ mod tests {
             tracker_terminal_states: vec!["Done".to_string()],
             polling_interval_ms: 30_000,
             workspace_root: PathBuf::from("/tmp/workspaces"),
+            git_user_name: None,
+            git_user_email: None,
             hooks: HooksConfig {
                 after_create: None,
                 before_run: None,
