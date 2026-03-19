@@ -135,10 +135,15 @@ An open issue with **no workflow label** defaults to state `Todo`.
 A **closed** issue defaults to state `Done`.
 
 **Review lifecycle:**
-```
-Todo → In Progress (Codex) → Code Review (Claude) → Human Review → Done
-                                    ↑                       |
-                                    └── Rework (Codex) ←────┘
+
+```mermaid
+graph LR
+    Todo -->|agent dispatched| InProgress["In Progress<br/>(Codex)"]
+    InProgress -->|PR created| CodeReview["Code Review<br/>(Claude)"]
+    CodeReview -->|approved| HumanReview["Human Review"]
+    CodeReview -->|needs work| Rework["Rework<br/>(Codex)"]
+    Rework -->|fixes pushed| CodeReview
+    HumanReview -->|approved| Done
 ```
 
 1. Implementation agent finishes and adds `code-review`
@@ -421,45 +426,48 @@ curl -X POST http://localhost:8080/api/v1/approve/abc123 \
 
 ## Architecture
 
-```
-WORKFLOW.md
-    |
-    v
-+-------------------+     +------------------+     +-----------------+
-|  Workflow Loader   |---->|   Config Layer   |---->|   Validation    |
-|  (YAML + prompt)   |     | (typed, defaults)|     | (preflight)     |
-+-------------------+     +------------------+     +-----------------+
-                                    |
-                                    v
-+-------------------+     +------------------+     +-----------------+
-|  GitHub Tracker   |<----|  Orchestrator    |---->| Workspace Mgr   |
-|  (issue polling)   |     | (state machine)  |     | (per-issue dirs) |
-+-------------------+     +------------------+     +-----------------+
-                                    |
-                                    v
-                          +------------------+     +-----------------+
-                          |  Agent Runner    |---->| Codex App-Server|
-                          | (protocol client)|     | (subprocess)    |
-                          +------------------+     +-----------------+
-                                    |
-                                    v
-                          +------------------+
-                          |  HTTP Server     |
-                          | (dashboard + API)|
-                          +------------------+
+```mermaid
+graph TB
+    WF["WORKFLOW.md<br/>(YAML config + prompt template)"]
+    WF --> Loader["Workflow Loader"]
+    Loader --> Config["Config Layer<br/>(typed, defaults, validation)"]
+    Config --> Orch
+
+    subgraph Orchestrator
+        Orch["Orchestrator<br/>(dispatch, reconcile, retry)"]
+        Orch -->|poll| Tracker["GitHub Tracker<br/>(issues + labels)"]
+        Orch -->|create| WM["Workspace Manager<br/>(per-issue dirs + hooks)"]
+        Orch -->|dispatch| Worker["Worker Tasks"]
+    end
+
+    subgraph Agents
+        Worker -->|"Codex (JSON-RPC)"| Codex["codex app-server"]
+        Worker -->|"Claude (CLI)"| Claude["claude -p"]
+    end
+
+    subgraph Pipeline["Pipeline Stages"]
+        direction LR
+        S1["architect<br/>(Claude)"] --> S2["in-progress<br/>(Codex)"]
+        S2 --> S3["code-review<br/>(Claude)"]
+        S3 -->|approved| S4["human-review<br/>(none)"]
+        S3 -->|rework| S2
+    end
+
+    Orch --> Dashboard["HTTP Dashboard<br/>(live activity, approvals,<br/>tokens, rate limits)"]
+    Tracker -->|"labels + state"| Pipeline
 ```
 
 **Crate structure:**
 
 | Crate | Purpose |
 |-------|---------|
-| `symphony-core` | Domain types, errors, identifiers |
+| `symphony-core` | Domain types, errors, pipeline stages, identifiers |
 | `symphony-workflow` | WORKFLOW.md parsing, config, Liquid templates, file watching |
-| `symphony-tracker` | `IssueTracker` trait + GitHub Issues adapter |
-| `symphony-workspace` | Workspace lifecycle, hooks, path safety |
-| `symphony-agent` | Codex app-server JSON-RPC protocol client |
-| `symphony-orchestrator` | Poll loop, dispatch, reconciliation, retry queue |
-| `symphony-server` | Axum HTTP server with dashboard + JSON REST API |
+| `symphony-tracker` | `IssueTracker` trait + GitHub Issues adapter + App token auth |
+| `symphony-workspace` | Workspace lifecycle, hooks, git identity, path safety |
+| `symphony-agent` | Codex JSON-RPC protocol + Claude CLI adapter |
+| `symphony-orchestrator` | Poll loop, dispatch, reconciliation, retry, approval queue |
+| `symphony-server` | Axum HTTP server with live dashboard + JSON REST API |
 | `symphony-logging` | Structured tracing setup |
 | `symphony-cli` | CLI entry point |
 
@@ -583,11 +591,14 @@ agent:
     rework: codex             # Codex fixes after review feedback
 ```
 
-Flow:
-```
-Todo → In Progress (Codex) → Code Review (Claude) → Human Review → Done
-                                    ↑                       |
-                                    └── Rework (Codex) ←────┘
+```mermaid
+graph LR
+    Todo --> InProgress["In Progress<br/>(Codex)"]
+    InProgress --> CodeReview["Code Review<br/>(Claude)"]
+    CodeReview -->|approved| HumanReview["Human Review"]
+    CodeReview -->|needs work| Rework["Rework<br/>(Codex)"]
+    Rework --> CodeReview
+    HumanReview --> Done
 ```
 
 The implementation agent moves the issue to `code-review` when done. Symphony automatically switches to the Claude agent for review. Claude reviews the PR and either approves (→ `human-review`) or requests changes (→ `rework`), where Codex picks it up again.
