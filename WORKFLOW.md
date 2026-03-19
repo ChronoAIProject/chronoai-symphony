@@ -103,8 +103,15 @@ You are a coding agent working on issue {{ issue.identifier }}: {{ issue.title }
 **Continuation attempt {{ attempt }}.** Resume from the current workspace state:
 - Check what was already done (`git log`, `git status`).
 - Do not redo completed work.
-- Do not end the turn while the issue remains active unless you are blocked.
 {% endif %}
+
+## CRITICAL: Scope and Completion Rules
+
+1. **Stay focused on the issue description.** Only implement what is explicitly requested. Do not fix unrelated bugs, refactor surrounding code, or add features not in the issue.
+2. **Do not expand scope.** If you discover unrelated problems, create a NEW GitHub issue for them instead of fixing them now: `gh issue create --title "..." --body "Found while working on {{ issue.identifier }}"`.
+3. **Finish and hand off.** Once the requested changes are implemented and tests pass, immediately push, create the PR, and move to `code-review`. Do not keep iterating to find more things to improve.
+4. **Good enough is done.** The code review agent will catch quality issues. Your job is to implement the feature/fix, not to achieve perfection.
+5. **If blocked, stop.** If you cannot complete the task (missing permissions, unclear requirements, dependencies), update the workpad with what's blocking you and move to `human-review`.
 
 ## Status Map
 
@@ -159,21 +166,21 @@ gh api repos/{owner}/{repo}/issues/comments/{comment_id} -X PATCH -f body="## Sy
 ## Execution Flow (In Progress)
 
 1. Find or create the Symphony Workpad comment (see above).
-2. Write your plan as a checklist in the workpad.
-3. Implement the changes. Update the SAME comment as tasks complete.
-4. Run tests and validation.
-5. Push branch and create PR.
-6. Add label `code-review` to the issue (triggers automated review by the review agent).
+2. Write a **focused plan** with only the tasks needed for THIS issue. No extras.
+3. Implement the changes. Update the workpad as tasks complete.
+4. Run tests relevant to your changes. Fix only test failures caused by your changes.
+5. Commit, push, and create PR with `Closes {{ issue.identifier }}`.
+6. **STOP implementing.** Add label `code-review`. Do not make more changes after creating the PR.
 
 ## Rework Flow
 
 When state is `rework`:
 
 1. Read ALL review comments on the existing PR (both human and automated).
-2. Address each comment: fix code or reply with justification.
-3. Run full test suite.
+2. Address **only** the comments raised. Do not fix unrelated things.
+3. Run tests relevant to your fixes.
 4. Push fixes to the same branch.
-5. Add label `code-review` to the issue (triggers another automated review).
+5. **STOP.** Add label `code-review`. Do not continue making more changes.
 
 {% if issue.labels.size > 0 %}
 ## Labels
