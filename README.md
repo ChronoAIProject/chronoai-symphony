@@ -665,11 +665,15 @@ Multiple stages can share the same state. Use `when_labels` to activate stages c
 ```yaml
 pipeline:
   stages:
-    # Conditional: only runs for issues with "needs-architect" label
-    - state: architect
+    # Architect: runs when maintainer adds "architect" label.
+    # Removes the label when done so the implementer picks it up.
+    - state: in-progress
       agent: claude
       role: architect
-      when_labels: [needs-architect]
+      when_labels: [architect]
+      prompt: |
+        Analyze {{ issue.identifier }}. Create an implementation plan.
+        Do NOT write code. Post the plan, then remove the `architect` label.
       transition_to: in-progress
 
     # Parallel: both run simultaneously when issue has both labels
@@ -698,15 +702,17 @@ pipeline:
 
 | Issue labels | What happens |
 |---|---|
-| `backend` + `frontend` | Both backend and frontend stages run **in parallel** |
+| `architect` | Claude creates implementation plan, removes label, then implementer runs next cycle |
+| `backend` + `frontend` | Both agents run **in parallel**, each scoped to their directory |
 | `backend` only | Only the backend stage runs |
 | `frontend` only | Only the frontend stage runs |
 | No matching labels | The fallback stage (no `when_labels`) runs |
-| `needs-architect` | Architect stage runs before implementation |
 
-- `when_labels` are user-defined GitHub labels, not hardcoded. Any label name works.
-- Stages **with** `when_labels` take priority over fallback stages (those without).
-- `scope` is appended to the prompt as a hint: "Focus your changes on the `backend/` directory."
+**Key points:**
+- `when_labels` are user-defined GitHub labels. Any label name works.
+- Stages **with** `when_labels` take priority over fallbacks (those without).
+- The **architect pattern** works by label presence: the architect removes its own label when done, so the next dispatch cycle picks up the fallback implementer instead.
+- `scope` is appended to the prompt: "Focus your changes on the `backend/` directory."
 - Each parallel worker gets its own session, activity feed, and token tracking in the dashboard.
 
 **Key differences between agent types:**

@@ -91,44 +91,23 @@ agents:
 #
 # pipeline:
 #   stages:
-#     - state: architect                    # Custom state - any name works
+#     # Architect stage: only for issues labeled "architect".
+#     # A maintainer adds "architect" when the issue is complex.
+#     # Issues without "architect" skip straight to implementation.
+#     - state: in-progress
 #       agent: claude
 #       role: architect
+#       when_labels: [architect]            # Only if maintainer adds this label
 #       prompt: |
 #         You are a software architect. Analyze {{ issue.identifier }}: {{ issue.title }}.
-#         Create a detailed implementation plan. Do NOT write code.
 #         {{ issue.description }}
-#         Post the plan as a comment and add label `in-progress`.
-#       transition_to: in-progress
-#     - state: in-progress
-#       agent: codex
-#       role: implementer                   # Available as {{ stage.role }} in prompt
-#       transition_to: code-review
-#     - state: code-review
-#       agent: claude
-#       role: reviewer
-#       prompt: |                           # Custom prompt REPLACES the body below
-#         You are a code review agent for {{ issue.identifier }}: {{ issue.title }}.
-#         Review the PR: `gh pr diff`
-#         Check code quality, tests, security, and architecture.
-#         If approved: add label `human-review`, remove `code-review`.
-#         If needs work: post review comments, add label `rework`, remove `code-review`.
-#       transition_to: human-review
-#       reject_to: rework
-#     - state: rework
-#       agent: codex
-#       role: implementer
-#       transition_to: code-review
-#     - state: human-review
-#       agent: none                         # No agent runs - handoff to human
+#         Create a detailed implementation plan. Do NOT write code.
+#         Post the plan as a Symphony Workpad comment, then remove the
+#         `architect` label so the implementer picks it up on the next cycle.
+#       transition_to: in-progress          # Stays in-progress, but without
+#                                           # "architect" label the fallback runs next
 #
-# Parallel stages with conditional routing (when_labels + scope):
-# Multiple stages can share the same state. Use `when_labels` to activate
-# stages conditionally based on issue labels. Stages without `when_labels`
-# act as fallbacks when no labeled stage matches.
-#
-# pipeline:
-#   stages:
+#     # Parallel: backend + frontend agents when issue has both labels
 #     - state: in-progress
 #       agent: codex
 #       role: backend-implementer
@@ -139,16 +118,38 @@ agents:
 #       agent: claude
 #       role: frontend-implementer
 #       when_labels: [frontend]             # Only if issue has "frontend" label
-#       scope: frontend/src
-#       transition_to: code-review
-#     - state: in-progress
-#       agent: codex
-#       role: default-implementer           # Fallback: no when_labels
+#       scope: frontend/
 #       transition_to: code-review
 #
-# If an issue has both "backend" and "frontend" labels, both the backend
-# and frontend stages run in parallel. If it has neither, the fallback
-# (default-implementer) runs instead.
+#     # Fullstack fallback: no backend/frontend label = one agent does it all
+#     - state: in-progress
+#       agent: codex
+#       role: implementer
+#       transition_to: code-review
+#
+#     # Code review
+#     - state: code-review
+#       agent: claude
+#       role: reviewer
+#       prompt: |
+#         Review PR for {{ issue.identifier }}: `gh pr diff`
+#         If good: add label `human-review`, remove `code-review`.
+#         If needs work: post review comments, add label `rework`, remove `code-review`.
+#       transition_to: human-review
+#       reject_to: rework
+#     - state: rework
+#       agent: codex
+#       role: implementer
+#       transition_to: code-review
+#     - state: human-review
+#       agent: none
+#
+# How the architect flow works:
+# 1. Maintainer creates issue, adds labels: symphony + architect
+# 2. Symphony dispatches Claude as architect (when_labels: [architect] matches)
+# 3. Claude creates implementation plan, removes "architect" label
+# 4. Next poll: "architect" label gone, fallback implementer stage runs
+# 5. No extra state needed - the label presence/absence controls routing
 
 server:
   port: 8080
