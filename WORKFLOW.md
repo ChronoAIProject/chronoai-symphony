@@ -81,11 +81,80 @@ agents:
   #   network_access: true
   #   turn_timeout_ms: 7200000           # 2 hours for full session.
 
+# Custom pipeline stages (optional). Define per-state agent, role, prompt,
+# and transitions. When set, these take priority over agent.by_state.
+#
+# Prompt behavior:
+# - No `prompt` on stage → uses the WORKFLOW.md body below with stage vars added
+# - `prompt` on stage → REPLACES the body. Use {{ default_prompt }} to include it.
+# - Available vars: {{ stage.role }}, {{ stage.transition_to }}, {{ stage.reject_to }}
+#
+# pipeline:
+#   stages:
+#     - state: architect                    # Custom state - any name works
+#       agent: claude
+#       role: architect
+#       prompt: |
+#         You are a software architect. Analyze {{ issue.identifier }}: {{ issue.title }}.
+#         Create a detailed implementation plan. Do NOT write code.
+#         {{ issue.description }}
+#         Post the plan as a comment and add label `in-progress`.
+#       transition_to: in-progress
+#     - state: in-progress
+#       agent: codex
+#       role: implementer                   # Available as {{ stage.role }} in prompt
+#       transition_to: code-review
+#     - state: code-review
+#       agent: claude
+#       role: reviewer
+#       prompt: |                           # Custom prompt REPLACES the body below
+#         You are a code review agent for {{ issue.identifier }}: {{ issue.title }}.
+#         Review the PR: `gh pr diff`
+#         Check code quality, tests, security, and architecture.
+#         If approved: add label `human-review`, remove `code-review`.
+#         If needs work: post review comments, add label `rework`, remove `code-review`.
+#       transition_to: human-review
+#       reject_to: rework
+#     - state: rework
+#       agent: codex
+#       role: implementer
+#       transition_to: code-review
+#     - state: human-review
+#       agent: none                         # No agent runs - handoff to human
+#
+# Parallel stages with conditional routing (when_labels + scope):
+# Multiple stages can share the same state. Use `when_labels` to activate
+# stages conditionally based on issue labels. Stages without `when_labels`
+# act as fallbacks when no labeled stage matches.
+#
+# pipeline:
+#   stages:
+#     - state: in-progress
+#       agent: codex
+#       role: backend-implementer
+#       when_labels: [backend]              # Only if issue has "backend" label
+#       scope: backend/                     # Hint: focus on this directory
+#       transition_to: code-review
+#     - state: in-progress
+#       agent: claude
+#       role: frontend-implementer
+#       when_labels: [frontend]             # Only if issue has "frontend" label
+#       scope: frontend/src
+#       transition_to: code-review
+#     - state: in-progress
+#       agent: codex
+#       role: default-implementer           # Fallback: no when_labels
+#       transition_to: code-review
+#
+# If an issue has both "backend" and "frontend" labels, both the backend
+# and frontend stages run in parallel. If it has neither, the fallback
+# (default-implementer) runs instead.
+
 server:
   port: 8080
 ---
 
-You are a coding agent working on issue {{ issue.identifier }}: {{ issue.title }}.
+You are a {% if stage.role %}{{ stage.role }}{% else %}coding agent{% endif %} working on issue {{ issue.identifier }}: {{ issue.title }}.
 
 ## Issue Details
 

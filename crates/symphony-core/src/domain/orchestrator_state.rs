@@ -31,6 +31,10 @@ pub struct RunningEntry {
     /// Retry attempt number if this is a retry, `None` for first run.
     pub retry_attempt: Option<u32>,
 
+    /// The pipeline stage role this worker is running (e.g., "frontend-implementer").
+    /// Used to track which stage of a parallel dispatch is handled by this entry.
+    pub stage_role: Option<String>,
+
     pub started_at: DateTime<Utc>,
     pub turn_count: u32,
 }

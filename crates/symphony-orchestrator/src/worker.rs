@@ -12,7 +12,7 @@ use symphony_agent::runner::AgentRunner;
 use symphony_core::domain::{AgentType, Issue, ServiceConfig};
 use symphony_core::identifiers::normalize_state;
 use symphony_tracker::traits::IssueTracker;
-use symphony_workflow::template::render_prompt;
+use symphony_workflow::template::{render_prompt, render_prompt_with_stage, StageContext};
 use symphony_workspace::manager::WorkspaceManager;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -56,10 +56,20 @@ pub async fn run_worker(
     event_tx: mpsc::Sender<(String, AgentEvent)>,
     approval_queue: Arc<PendingApprovalQueue>,
     cancel_rx: tokio::sync::watch::Receiver<bool>,
+    stage_role: Option<String>,
+    scope: Option<String>,
 ) -> WorkerResult {
     let issue_id = issue.id.clone();
     let identifier = issue.identifier.clone();
     let max_turns = config.agent_max_turns;
+
+    // Construct the issue_id used for events and running map key; if running
+    // under a stage role, use the compound key so events route correctly.
+    let event_issue_id = if let Some(ref role) = stage_role {
+        format!("{}:{}", issue_id, role)
+    } else {
+        issue_id.clone()
+    };
 
     // Resolve which agent profile to use for this issue.
     let profile = config.resolve_agent_for_issue(&issue).clone();
@@ -70,6 +80,7 @@ pub async fn run_worker(
     info!(
         issue_id = %issue_id,
         identifier = %issue.identifier,
+        stage_role = ?stage_role,
         attempt = ?attempt,
         max_turns,
         "worker starting"
@@ -81,26 +92,67 @@ pub async fn run_worker(
         Err(e) => {
             error!(issue_id = %issue_id, error = %e, "failed to prepare workspace");
             return WorkerResult {
-                issue_id,
+                issue_id: event_issue_id,
                 exit_reason: WorkerExitReason::Abnormal(format!("workspace error: {e}")),
             };
         }
     };
     let workspace_path = workspace.path;
 
-    // Step 2: Render prompt template with issue data.
-    let rendered_prompt = match render_prompt(&prompt_template, &issue, attempt) {
-        Ok(p) => {
-            info!(issue_id = %issue_id, prompt_len = p.len(), "prompt rendered");
-            p
+    // Step 2: Render prompt template with issue data and optional stage context.
+    let stage = config.resolve_stage_for_issue(&issue);
+    let rendered_prompt = {
+        let result = if let Some(s) = &stage {
+            if let Some(ref stage_prompt) = s.prompt {
+                // Two-pass: render default prompt first, then render stage
+                // prompt with the default prompt available as {{ default_prompt }}.
+                let default_rendered = render_prompt(&prompt_template, &issue, attempt)
+                    .unwrap_or_default();
+                let ctx = StageContext {
+                    role: s.role.clone(),
+                    transition_to: s.transition_to.clone(),
+                    reject_to: s.reject_to.clone(),
+                    default_prompt: default_rendered,
+                };
+                render_prompt_with_stage(stage_prompt, &issue, attempt, Some(&ctx))
+            } else {
+                // No custom prompt, but add stage vars to default prompt.
+                let ctx = StageContext {
+                    role: s.role.clone(),
+                    transition_to: s.transition_to.clone(),
+                    reject_to: s.reject_to.clone(),
+                    default_prompt: String::new(),
+                };
+                render_prompt_with_stage(&prompt_template, &issue, attempt, Some(&ctx))
+            }
+        } else {
+            render_prompt(&prompt_template, &issue, attempt)
+        };
+
+        match result {
+            Ok(p) => {
+                info!(issue_id = %issue_id, prompt_len = p.len(), "prompt rendered");
+                p
+            }
+            Err(e) => {
+                error!(issue_id = %issue_id, error = %e, "failed to render prompt template");
+                return WorkerResult {
+                    issue_id: event_issue_id,
+                    exit_reason: WorkerExitReason::Abnormal(format!("prompt render failed: {e}")),
+                };
+            }
         }
-        Err(e) => {
-            error!(issue_id = %issue_id, error = %e, "failed to render prompt template");
-            return WorkerResult {
-                issue_id,
-                exit_reason: WorkerExitReason::Abnormal(format!("prompt render failed: {e}")),
-            };
-        }
+    };
+
+    // Step 2a: Append scope hint to the prompt if provided.
+    let rendered_prompt = if let Some(ref scope_dir) = scope {
+        format!(
+            "{}\n\n## Scope\n\nFocus your changes on the `{}` directory. \
+             Other agents may be working on other parts of the codebase simultaneously.\n",
+            rendered_prompt, scope_dir
+        )
+    } else {
+        rendered_prompt
     };
 
     // Step 2b: Set git identity in the workspace if configured.
@@ -123,17 +175,18 @@ pub async fn run_worker(
     if let Err(e) = workspace_manager.run_before_run_hook(&workspace_path, Some(&issue_id), Some(&identifier)).await {
         error!(issue_id = %issue_id, error = %e, "before_run hook failed");
         return WorkerResult {
-            issue_id,
+            issue_id: event_issue_id,
             exit_reason: WorkerExitReason::Abnormal(format!("before_run hook failed: {e}")),
         };
     }
 
-    // Create a per-issue event sender that tags events with the issue ID.
+    // Create a per-issue event sender that tags events with the issue ID
+    // (or compound key for parallel stages).
     let (local_tx, mut local_rx) = mpsc::channel::<AgentEvent>(64);
 
     // Forward events with issue ID tagging.
     let forward_tx = event_tx.clone();
-    let forward_issue_id = issue_id.clone();
+    let forward_issue_id = event_issue_id.clone();
     tokio::spawn(async move {
         while let Some(event) = local_rx.recv().await {
             let _ = forward_tx.send((forward_issue_id.clone(), event)).await;
@@ -186,7 +239,7 @@ pub async fn run_worker(
     );
 
     WorkerResult {
-        issue_id,
+        issue_id: event_issue_id,
         exit_reason,
     }
 }
@@ -395,14 +448,19 @@ async fn run_codex_worker(
                             break;
                         }
 
-                        let handoff_states = [
-                            "human review", "human-review", "humanreview",
-                            "code review", "code-review", "codereview",
-                            "merging", "blocked",
-                        ];
-                        let is_handoff = handoff_states
-                            .iter()
-                            .any(|h| normalize_state(h) == normalized);
+                        let is_handoff = if config.pipeline_stages.is_empty() {
+                            // Legacy hardcoded list.
+                            let handoff_states = [
+                                "human review", "human-review", "humanreview",
+                                "code review", "code-review", "codereview",
+                                "merging", "blocked",
+                            ];
+                            handoff_states
+                                .iter()
+                                .any(|h| normalize_state(h) == normalized)
+                        } else {
+                            config.is_no_agent_state_by_name(&updated.state)
+                        };
 
                         if is_handoff {
                             info!(

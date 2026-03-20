@@ -67,6 +67,83 @@ pub fn render_prompt(
     Ok(rendered)
 }
 
+/// Context for a pipeline stage, passed to `render_prompt_with_stage`.
+#[derive(Clone, Debug, Default)]
+pub struct StageContext {
+    pub role: Option<String>,
+    pub transition_to: Option<String>,
+    pub reject_to: Option<String>,
+    pub default_prompt: String,
+}
+
+/// Render a Liquid prompt template with both issue context and pipeline stage
+/// context.
+///
+/// Adds the following Liquid variables on top of the standard `issue.*` and
+/// `attempt` variables:
+///
+/// - `stage.role` - The role assigned to this stage (may be nil).
+/// - `stage.transition_to` - The next state on success (may be nil).
+/// - `stage.reject_to` - The next state on rejection (may be nil).
+/// - `default_prompt` - The rendered default prompt (useful for two-pass
+///   rendering where a stage prompt wraps the base prompt).
+pub fn render_prompt_with_stage(
+    template_str: &str,
+    issue: &Issue,
+    attempt: Option<u32>,
+    stage: Option<&StageContext>,
+) -> Result<String, SymphonyError> {
+    let effective_template = if template_str.trim().is_empty() {
+        DEFAULT_PROMPT
+    } else {
+        template_str
+    };
+
+    let parser = build_strict_parser()?;
+
+    let compiled = parser.parse(effective_template).map_err(|e| {
+        SymphonyError::TemplateRenderError {
+            detail: format!("template parse error: {e}"),
+        }
+    })?;
+
+    let mut globals = build_globals(issue, attempt)?;
+
+    // Add stage variables when present.
+    if let Some(ctx) = stage {
+        let mut stage_obj = Object::new();
+        stage_obj.insert(
+            "role".into(),
+            option_to_liquid(&ctx.role),
+        );
+        stage_obj.insert(
+            "transition_to".into(),
+            option_to_liquid(&ctx.transition_to),
+        );
+        stage_obj.insert(
+            "reject_to".into(),
+            option_to_liquid(&ctx.reject_to),
+        );
+        globals.insert("stage".into(), LiquidValue::Object(stage_obj));
+        globals.insert(
+            "default_prompt".into(),
+            if ctx.default_prompt.is_empty() {
+                LiquidValue::Nil
+            } else {
+                to_liquid_str(&ctx.default_prompt)
+            },
+        );
+    }
+
+    let rendered = compiled.render(&globals).map_err(|e| {
+        SymphonyError::TemplateRenderError {
+            detail: format!("template render error: {e}"),
+        }
+    })?;
+
+    Ok(rendered)
+}
+
 /// Build a strict-mode Liquid parser that rejects unknown variables and filters.
 fn build_strict_parser() -> Result<Parser, SymphonyError> {
     ParserBuilder::with_stdlib()
@@ -268,5 +345,77 @@ mod tests {
             SymphonyError::TemplateRenderError { .. } => {}
             other => panic!("expected TemplateRenderError, got: {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // render_prompt_with_stage tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn render_with_stage_role() {
+        let template = "Role: {{ stage.role }}";
+        let ctx = StageContext {
+            role: Some("reviewer".to_string()),
+            transition_to: None,
+            reject_to: None,
+            default_prompt: String::new(),
+        };
+        let result =
+            render_prompt_with_stage(template, &sample_issue(), None, Some(&ctx)).unwrap();
+        assert_eq!(result, "Role: reviewer");
+    }
+
+    #[test]
+    fn render_with_stage_transition_targets() {
+        let template = "Next: {{ stage.transition_to }}, Back: {{ stage.reject_to }}";
+        let ctx = StageContext {
+            role: None,
+            transition_to: Some("human-review".to_string()),
+            reject_to: Some("rework".to_string()),
+            default_prompt: String::new(),
+        };
+        let result =
+            render_prompt_with_stage(template, &sample_issue(), None, Some(&ctx)).unwrap();
+        assert_eq!(result, "Next: human-review, Back: rework");
+    }
+
+    #[test]
+    fn render_with_default_prompt() {
+        let base_template = "Base for {{ issue.identifier }}";
+        let base_rendered = render_prompt(base_template, &sample_issue(), None).unwrap();
+
+        let stage_template = "Stage prompt. {{ default_prompt }}";
+        let ctx = StageContext {
+            role: Some("implementer".to_string()),
+            transition_to: None,
+            reject_to: None,
+            default_prompt: base_rendered.clone(),
+        };
+        let result =
+            render_prompt_with_stage(stage_template, &sample_issue(), None, Some(&ctx))
+                .unwrap();
+        assert_eq!(result, format!("Stage prompt. {base_rendered}"));
+    }
+
+    #[test]
+    fn render_with_stage_nil_role() {
+        let template = "{% if stage.role %}R: {{ stage.role }}{% else %}no role{% endif %}";
+        let ctx = StageContext {
+            role: None,
+            transition_to: None,
+            reject_to: None,
+            default_prompt: String::new(),
+        };
+        let result =
+            render_prompt_with_stage(template, &sample_issue(), None, Some(&ctx)).unwrap();
+        assert_eq!(result, "no role");
+    }
+
+    #[test]
+    fn render_with_stage_none_falls_back_to_regular() {
+        let template = "Issue: {{ issue.title }}";
+        let result =
+            render_prompt_with_stage(template, &sample_issue(), None, None).unwrap();
+        assert_eq!(result, "Issue: Fix login bug");
     }
 }

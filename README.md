@@ -1,14 +1,28 @@
 # chronoai-symphony
 
-A Rust implementation of the [Symphony Service Specification](https://github.com/openai/symphony/blob/main/SPEC.md) that orchestrates coding agents against **GitHub Issues**.
+A multi-agent coding orchestrator built on the [Symphony Service Specification](https://github.com/openai/symphony/blob/main/SPEC.md), extended with multi-agent pipelines, native Claude Code support, and a live operations dashboard.
 
-Symphony is a long-running automation service that:
+Symphony turns GitHub Issues into autonomous coding sessions. It polls your repository, dispatches coding agents (OpenAI Codex or Claude Code) to work on issues in isolated workspaces, manages the full lifecycle from implementation through code review to human approval, and provides real-time observability through a web dashboard.
 
-- Polls GitHub Issues on a fixed cadence
-- Creates isolated per-issue workspaces
-- Runs coding agent sessions (Codex app-server compatible) for each issue
-- Manages retries with exponential backoff
-- Provides an HTTP dashboard and JSON API for observability
+**Key features beyond the Symphony spec:**
+
+- **Multi-agent pipelines** - Different agents for different workflow phases (e.g., Codex implements, Claude reviews)
+- **Native Claude Code CLI** - Direct integration with `claude -p`, no third-party wrappers
+- **Custom pipeline stages** - Define any workflow state with its own agent, role, and prompt
+- **Per-stage prompts** - Each pipeline stage can have its own prompt template
+- **Live dashboard** - Real-time activity feed, token usage, rate limits, approval queue
+- **GitHub App auth** - Bot identity for commits/PRs with auto-refreshing tokens
+- **PR review cycle** - Automated code review → human review → rework loop
+
+**Core capabilities:**
+
+- Polls GitHub Issues and dispatches agents based on labels and state
+- Creates isolated per-issue workspaces with feature branches
+- Runs multiple agents in parallel on different issues
+- Manages retries with exponential backoff and stall detection
+- Streams agent activity to a web dashboard with approve/deny controls
+- Tracks token usage and rate limits across both Codex and Claude
+- Hot-reloads WORKFLOW.md changes without restart
 
 ## Agent-Assisted Setup
 
@@ -121,10 +135,15 @@ An open issue with **no workflow label** defaults to state `Todo`.
 A **closed** issue defaults to state `Done`.
 
 **Review lifecycle:**
-```
-Todo → In Progress (Codex) → Code Review (Claude) → Human Review → Done
-                                    ↑                       |
-                                    └── Rework (Codex) ←────┘
+
+```mermaid
+graph LR
+    Todo -->|agent dispatched| InProgress["In Progress<br/>(Codex)"]
+    InProgress -->|PR created| CodeReview["Code Review<br/>(Claude)"]
+    CodeReview -->|approved| HumanReview["Human Review"]
+    CodeReview -->|needs work| Rework["Rework<br/>(Codex)"]
+    Rework -->|fixes pushed| CodeReview
+    HumanReview -->|approved| Done
 ```
 
 1. Implementation agent finishes and adds `code-review`
@@ -246,10 +265,21 @@ agents:
     network_access: true
     turn_timeout_ms: 7200000           # 2 hours for full Claude session.
 
-# Legacy single-agent format (still supported):
-# codex:
-#   command: codex app-server
-#   model: gpt-5.3-codex
+# Optional: custom pipeline stages (replaces agent.by_state when set)
+# pipeline:
+#   stages:
+#     - state: in-progress               # Stage per state.
+#       agent: codex                     # Agent profile name, or "none".
+#       role: implementer               # {{ stage.role }} in prompts.
+#       transition_to: code-review      # {{ stage.transition_to }}.
+#     - state: code-review
+#       agent: claude
+#       role: reviewer
+#       prompt: "Custom prompt..."       # Replaces WORKFLOW.md body.
+#       transition_to: human-review
+#       reject_to: rework               # {{ stage.reject_to }}.
+#     - state: human-review
+#       agent: none                      # No agent dispatched.
 
 server:
   port: 8080                            # Enable HTTP dashboard on this port.
@@ -396,45 +426,48 @@ curl -X POST http://localhost:8080/api/v1/approve/abc123 \
 
 ## Architecture
 
-```
-WORKFLOW.md
-    |
-    v
-+-------------------+     +------------------+     +-----------------+
-|  Workflow Loader   |---->|   Config Layer   |---->|   Validation    |
-|  (YAML + prompt)   |     | (typed, defaults)|     | (preflight)     |
-+-------------------+     +------------------+     +-----------------+
-                                    |
-                                    v
-+-------------------+     +------------------+     +-----------------+
-|  GitHub Tracker   |<----|  Orchestrator    |---->| Workspace Mgr   |
-|  (issue polling)   |     | (state machine)  |     | (per-issue dirs) |
-+-------------------+     +------------------+     +-----------------+
-                                    |
-                                    v
-                          +------------------+     +-----------------+
-                          |  Agent Runner    |---->| Codex App-Server|
-                          | (protocol client)|     | (subprocess)    |
-                          +------------------+     +-----------------+
-                                    |
-                                    v
-                          +------------------+
-                          |  HTTP Server     |
-                          | (dashboard + API)|
-                          +------------------+
+```mermaid
+graph TB
+    WF["WORKFLOW.md<br/>(YAML config + prompt template)"]
+    WF --> Loader["Workflow Loader"]
+    Loader --> Config["Config Layer<br/>(typed, defaults, validation)"]
+    Config --> Orch
+
+    subgraph Orchestrator
+        Orch["Orchestrator<br/>(dispatch, reconcile, retry)"]
+        Orch -->|poll| Tracker["GitHub Tracker<br/>(issues + labels)"]
+        Orch -->|create| WM["Workspace Manager<br/>(per-issue dirs + hooks)"]
+        Orch -->|dispatch| Worker["Worker Tasks"]
+    end
+
+    subgraph Agents
+        Worker -->|"Codex (JSON-RPC)"| Codex["codex app-server"]
+        Worker -->|"Claude (CLI)"| Claude["claude -p"]
+    end
+
+    subgraph Pipeline["Pipeline Stages"]
+        direction LR
+        S1["architect<br/>(Claude)"] --> S2["in-progress<br/>(Codex)"]
+        S2 --> S3["code-review<br/>(Claude)"]
+        S3 -->|approved| S4["human-review<br/>(none)"]
+        S3 -->|rework| S2
+    end
+
+    Orch --> Dashboard["HTTP Dashboard<br/>(live activity, approvals,<br/>tokens, rate limits)"]
+    Tracker -->|"labels + state"| Pipeline
 ```
 
 **Crate structure:**
 
 | Crate | Purpose |
 |-------|---------|
-| `symphony-core` | Domain types, errors, identifiers |
+| `symphony-core` | Domain types, errors, pipeline stages, identifiers |
 | `symphony-workflow` | WORKFLOW.md parsing, config, Liquid templates, file watching |
-| `symphony-tracker` | `IssueTracker` trait + GitHub Issues adapter |
-| `symphony-workspace` | Workspace lifecycle, hooks, path safety |
-| `symphony-agent` | Codex app-server JSON-RPC protocol client |
-| `symphony-orchestrator` | Poll loop, dispatch, reconciliation, retry queue |
-| `symphony-server` | Axum HTTP server with dashboard + JSON REST API |
+| `symphony-tracker` | `IssueTracker` trait + GitHub Issues adapter + App token auth |
+| `symphony-workspace` | Workspace lifecycle, hooks, git identity, path safety |
+| `symphony-agent` | Codex JSON-RPC protocol + Claude CLI adapter |
+| `symphony-orchestrator` | Poll loop, dispatch, reconciliation, retry, approval queue |
+| `symphony-server` | Axum HTTP server with live dashboard + JSON REST API |
 | `symphony-logging` | Structured tracing setup |
 | `symphony-cli` | CLI entry point |
 
@@ -558,14 +591,123 @@ agent:
     rework: codex             # Codex fixes after review feedback
 ```
 
-Flow:
-```
-Todo → In Progress (Codex) → Code Review (Claude) → Human Review → Done
-                                    ↑                       |
-                                    └── Rework (Codex) ←────┘
+```mermaid
+graph LR
+    Todo --> InProgress["In Progress<br/>(Codex)"]
+    InProgress --> CodeReview["Code Review<br/>(Claude)"]
+    CodeReview -->|approved| HumanReview["Human Review"]
+    CodeReview -->|needs work| Rework["Rework<br/>(Codex)"]
+    Rework --> CodeReview
+    HumanReview --> Done
 ```
 
 The implementation agent moves the issue to `code-review` when done. Symphony automatically switches to the Claude agent for review. Claude reviews the PR and either approves (→ `human-review`) or requests changes (→ `rework`), where Codex picks it up again.
+
+### Custom pipeline stages (advanced)
+
+For full control, use the `pipeline:` section. Each stage defines an agent, role, optional prompt override, and transitions. This replaces `agent.by_state`:
+
+```yaml
+pipeline:
+  stages:
+    - state: architect                    # Custom state - any name
+      agent: claude
+      role: architect
+      prompt: |                           # Custom prompt REPLACES the WORKFLOW.md body
+        You are a software architect. Analyze {{ issue.identifier }}.
+        Create an implementation plan. Do NOT write code.
+        {{ issue.description }}
+      transition_to: in-progress
+
+    - state: in-progress
+      agent: codex
+      role: implementer                   # Available as {{ stage.role }} in the prompt
+      transition_to: code-review
+
+    - state: code-review
+      agent: claude
+      role: reviewer
+      prompt: |                           # Different prompt for review phase
+        Review PR for {{ issue.identifier }}: `gh pr diff`
+        If good: add label `human-review`. If not: add label `rework`.
+      transition_to: human-review
+      reject_to: rework
+
+    - state: rework
+      agent: codex
+      role: implementer
+      transition_to: code-review
+
+    - state: human-review
+      agent: none                         # No agent - handoff to human
+```
+
+**Prompt behavior:**
+
+| Stage config | What happens |
+|---|---|
+| No `prompt` field | Uses the WORKFLOW.md body with `{{ stage.role }}`, `{{ stage.transition_to }}`, `{{ stage.reject_to }}` injected |
+| Has `prompt` field | Stage prompt **replaces** the WORKFLOW.md body. Use `{{ default_prompt }}` to include the original body |
+
+**Template variables available in all prompts:**
+
+| Variable | Description |
+|---|---|
+| `{{ stage.role }}` | Role label (e.g., "implementer", "reviewer", "architect") |
+| `{{ stage.transition_to }}` | Next state on success |
+| `{{ stage.reject_to }}` | Next state on rejection |
+| `{{ default_prompt }}` | The rendered WORKFLOW.md body (only in stage prompt overrides) |
+
+### Parallel agents and conditional stages
+
+Multiple stages can share the same state. Use `when_labels` to activate stages conditionally based on issue labels, and `scope` to tell each agent where to focus:
+
+```yaml
+pipeline:
+  stages:
+    # Conditional: only runs for issues with "needs-architect" label
+    - state: architect
+      agent: claude
+      role: architect
+      when_labels: [needs-architect]
+      transition_to: in-progress
+
+    # Parallel: both run simultaneously when issue has both labels
+    - state: in-progress
+      agent: codex
+      role: backend-dev
+      when_labels: [backend]
+      scope: backend/
+      transition_to: code-review
+
+    - state: in-progress
+      agent: claude
+      role: frontend-dev
+      when_labels: [frontend]
+      scope: frontend/
+      transition_to: code-review
+
+    # Fallback: runs when no labeled stage matches
+    - state: in-progress
+      agent: codex
+      role: implementer
+      transition_to: code-review
+```
+
+**How it works:**
+
+| Issue labels | What happens |
+|---|---|
+| `backend` + `frontend` | Both backend and frontend stages run **in parallel** |
+| `backend` only | Only the backend stage runs |
+| `frontend` only | Only the frontend stage runs |
+| No matching labels | The fallback stage (no `when_labels`) runs |
+| `needs-architect` | Architect stage runs before implementation |
+
+- `when_labels` are user-defined GitHub labels, not hardcoded. Any label name works.
+- Stages **with** `when_labels` take priority over fallback stages (those without).
+- `scope` is appended to the prompt as a hint: "Focus your changes on the `backend/` directory."
+- Each parallel worker gets its own session, activity feed, and token tracking in the dashboard.
 
 **Key differences between agent types:**
 
