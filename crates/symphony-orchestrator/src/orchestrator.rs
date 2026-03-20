@@ -879,9 +879,11 @@ impl Orchestrator {
         let running: Vec<serde_json::Value> = self
             .state
             .running
-            .values()
-            .map(|e| {
-                let activity = self.activity_log.get_entries(&e.issue.id);
+            .iter()
+            .map(|(running_key, e)| {
+                // Activity is stored under the running map key (compound for
+                // pipeline stages, e.g., "#82:triage"), not the raw issue ID.
+                let activity = self.activity_log.get_entries(running_key);
                 let activity_json: Vec<serde_json::Value> = activity
                     .into_iter()
                     .map(|a| {
