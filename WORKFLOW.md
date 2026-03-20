@@ -192,21 +192,25 @@ You are a {% if stage.role %}{{ stage.role }}{% else %}coding agent{% endif %} w
 
 - **Todo** -> Add label `in-progress`, remove `todo`, then start execution.
 - **In Progress** -> Implement the changes. When done, add label `code-review` (for automated review) or `human-review` (skip to human).
-- **Code Review** -> You are the **review agent**. Review the PR for this issue:
+- **Code Review** -> You are the **review agent**. Review the PR:
   1. Read all changed files: `gh pr diff`
   2. Check code quality, tests, security, and architecture
-  3. If changes look good: add label `human-review`, remove `code-review`
-  4. If changes need work: post review comments on the PR, add label `rework`, remove `code-review`
+  3. If approved: `gh issue edit {{ issue.identifier }} --remove-label code-review --add-label human-review`
+  4. If needs work: post review comments on the PR, then `gh issue edit {{ issue.identifier }} --remove-label code-review --add-label rework`
 - **Human Review** -> Do not code. Poll for review updates.
-- **Rework** -> Read all PR review comments, address feedback, push fixes, then move back to `code-review` or `human-review`.
+- **Rework** -> Read PR review comments, address feedback, push fixes, then `gh issue edit {{ issue.identifier }} --remove-label rework --add-label code-review`.
 - **Done / Closed** -> Do nothing, shut down.
 
 ## Git Workflow
 
 1. You are on branch `symphony/issue-{{ issue.identifier | remove: "#" }}` (created from `main`).
 2. Commit with conventional messages (`feat:`, `fix:`, `refactor:`).
-3. Push and create a pull request targeting `main`.
-4. Include `Closes {{ issue.identifier }}` in the PR description.
+3. Push your commits to the branch.
+4. Check if a PR already exists for this branch: `gh pr list --head symphony/issue-{{ issue.identifier | remove: "#" }} --json number --jq '.[0].number'`
+5. If no PR exists, create one: `gh pr create --title "{{ issue.identifier }}: {{ issue.title }}" --body "Closes {{ issue.identifier }}" --head symphony/issue-{{ issue.identifier | remove: "#" }}`
+6. If a PR already exists (e.g., another parallel agent created it), just push to the same branch - the PR updates automatically.
+
+**IMPORTANT:** All agents working on the same issue share the same branch and PR. Do NOT create separate branches or PRs.
 
 ## Symphony Workpad (Single Persistent Comment)
 
@@ -233,8 +237,9 @@ gh api repos/{owner}/{repo}/issues/comments/{comment_id} -X PATCH -f body="## Sy
 2. Write a **focused plan** with only the tasks needed for THIS issue. No extras.
 3. Implement the changes. Update the workpad as tasks complete.
 4. Run tests relevant to your changes. Fix only test failures caused by your changes.
-5. Commit, push, and create PR with `Closes {{ issue.identifier }}`.
-6. **STOP implementing.** Add label `code-review`. Do not make more changes after creating the PR.
+5. Commit and push to the branch. Create a PR if one doesn't exist (see Git Workflow).
+6. **STOP implementing.** Update the **issue** label (NOT the PR):
+   `gh issue edit {{ issue.identifier }} --remove-label in-progress --add-label code-review`
 
 ## Rework Flow
 
@@ -244,7 +249,8 @@ When state is `rework`:
 2. Address **only** the comments raised. Do not fix unrelated things.
 3. Run tests relevant to your fixes.
 4. Push fixes to the same branch.
-5. **STOP.** Add label `code-review`. Do not continue making more changes.
+5. **STOP.** Update the **issue** label (NOT the PR):
+   `gh issue edit {{ issue.identifier }} --remove-label rework --add-label code-review`
 
 {% if issue.labels.size > 0 %}
 ## Labels
