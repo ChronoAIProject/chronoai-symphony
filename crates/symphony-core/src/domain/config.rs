@@ -72,6 +72,10 @@ pub struct AgentProfileConfig {
 /// Maps an issue state to an agent profile with optional role, prompt override,
 /// and transition targets. When `agent` is `"none"`, the stage is a handoff
 /// point where no agent runs (e.g., waiting for human review).
+///
+/// Multiple stages can share the same state for parallel dispatch (e.g.,
+/// a frontend and backend agent working simultaneously). Use `when_labels`
+/// to conditionally activate stages based on issue labels.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct PipelineStage {
     pub state: String,
@@ -80,6 +84,13 @@ pub struct PipelineStage {
     pub prompt: Option<String>,
     pub transition_to: Option<String>,
     pub reject_to: Option<String>,
+    /// Labels required for this stage to activate. ALL listed labels must
+    /// be present on the issue. An empty vec means the stage is a fallback
+    /// that activates when no labeled stage matches.
+    pub when_labels: Vec<String>,
+    /// Directory scope hint for the agent (e.g., "backend/", "frontend/src").
+    /// Appended to the prompt so the agent focuses on the relevant area.
+    pub scope: Option<String>,
 }
 
 /// Fully resolved service configuration with typed fields and applied defaults.
@@ -346,17 +357,73 @@ impl ServiceConfig {
     /// Resolve the pipeline stage for an issue based on its state.
     ///
     /// Returns `None` if no pipeline is configured or no stage matches.
+    /// For backward compatibility, returns the first matching stage from
+    /// [`resolve_stages_for_issue`].
     pub fn resolve_stage_for_issue(&self, issue: &Issue) -> Option<&PipelineStage> {
+        self.resolve_stages_for_issue(issue).into_iter().next()
+    }
+
+    /// Resolve ALL matching pipeline stages for an issue.
+    ///
+    /// Returns multiple stages when parallel dispatch is needed (e.g.,
+    /// frontend + backend agents on the same state).
+    ///
+    /// Matching rules:
+    /// 1. Filter stages by state (normalized fuzzy match).
+    /// 2. Among matching stages, check `when_labels`:
+    ///    - If a stage has `when_labels`, ALL must be present in `issue.labels`.
+    ///    - If a stage has no `when_labels`, it is a fallback.
+    /// 3. If any labeled stages match, return only those (not fallbacks).
+    /// 4. If no labeled stages match, return fallback stages.
+    /// 5. Returns empty vec if no pipeline configured or no stages match.
+    pub fn resolve_stages_for_issue(&self, issue: &Issue) -> Vec<&PipelineStage> {
         if self.pipeline_stages.is_empty() {
-            return None;
+            return vec![];
         }
         let normalize = |s: &str| -> String {
             s.to_lowercase().replace('-', " ").replace('_', " ")
         };
         let issue_state_norm = normalize(&issue.state);
-        self.pipeline_stages.iter().find(|stage| {
-            normalize(&stage.state) == issue_state_norm
-        })
+
+        // Get all stages matching this state.
+        let matching: Vec<&PipelineStage> = self
+            .pipeline_stages
+            .iter()
+            .filter(|stage| normalize(&stage.state) == issue_state_norm)
+            .collect();
+
+        if matching.is_empty() {
+            return vec![];
+        }
+
+        // Split into labeled and fallback stages.
+        let labeled: Vec<&PipelineStage> = matching
+            .iter()
+            .filter(|s| !s.when_labels.is_empty())
+            .filter(|s| {
+                // All when_labels must be present in issue.labels.
+                s.when_labels.iter().all(|required| {
+                    issue
+                        .labels
+                        .iter()
+                        .any(|l| l.to_lowercase() == required.to_lowercase())
+                })
+            })
+            .copied()
+            .collect();
+
+        let fallbacks: Vec<&PipelineStage> = matching
+            .iter()
+            .filter(|s| s.when_labels.is_empty())
+            .copied()
+            .collect();
+
+        // Labeled stages take priority; fallbacks only when no labeled match.
+        if !labeled.is_empty() {
+            labeled
+        } else {
+            fallbacks
+        }
     }
 
     /// Check whether a given state name maps to a pipeline stage with
@@ -547,6 +614,9 @@ fn parse_pipeline_stages(root: &Mapping) -> Vec<PipelineStage> {
                     prompt: get_str(m, "prompt"),
                     transition_to: get_str(m, "transition_to"),
                     reject_to: get_str(m, "reject_to"),
+                    when_labels: get_string_list(m, "when_labels")
+                        .unwrap_or_default(),
+                    scope: get_str(m, "scope"),
                 })
             })
             .collect(),
@@ -1175,5 +1245,261 @@ pipeline:
         // Pipeline stage should take priority over agent_by_state.
         let profile = cfg.resolve_agent_for_issue(&issue);
         assert_eq!(profile.command, "claude-app-server");
+    }
+
+    // -----------------------------------------------------------------------
+    // Parallel / conditional pipeline stage tests
+    // -----------------------------------------------------------------------
+
+    fn make_test_issue(id: &str, state: &str, labels: Vec<&str>) -> Issue {
+        Issue {
+            id: id.to_string(),
+            identifier: format!("#{id}"),
+            title: "Test".to_string(),
+            description: None,
+            priority: None,
+            state: state.to_string(),
+            branch_name: None,
+            url: None,
+            labels: labels.into_iter().map(String::from).collect(),
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    fn resolve_stages_parallel_both_match() {
+        unsafe { env::set_var("TEST_API_KEY_PP1", "key") };
+        let wf = make_workflow(
+            r#"
+tracker:
+  kind: github
+  api_key: $TEST_API_KEY_PP1
+  project_slug: owner/repo
+pipeline:
+  stages:
+    - state: in-progress
+      agent: codex
+      role: backend-implementer
+      when_labels:
+        - backend
+      scope: backend/
+    - state: in-progress
+      agent: claude
+      role: frontend-implementer
+      when_labels:
+        - frontend
+      scope: frontend/
+"#,
+        );
+        let cfg = ServiceConfig::from_workflow(&wf).unwrap();
+
+        // Issue has both labels.
+        let issue = make_test_issue("1", "In-Progress", vec!["backend", "frontend"]);
+        let stages = cfg.resolve_stages_for_issue(&issue);
+        assert_eq!(stages.len(), 2);
+
+        let roles: Vec<_> = stages
+            .iter()
+            .map(|s| s.role.as_deref().unwrap())
+            .collect();
+        assert!(roles.contains(&"backend-implementer"));
+        assert!(roles.contains(&"frontend-implementer"));
+    }
+
+    #[test]
+    fn resolve_stages_fallback_when_no_labels_match() {
+        unsafe { env::set_var("TEST_API_KEY_PP2", "key") };
+        let wf = make_workflow(
+            r#"
+tracker:
+  kind: github
+  api_key: $TEST_API_KEY_PP2
+  project_slug: owner/repo
+pipeline:
+  stages:
+    - state: in-progress
+      agent: codex
+      role: backend-implementer
+      when_labels:
+        - backend
+    - state: in-progress
+      agent: codex
+      role: default-implementer
+"#,
+        );
+        let cfg = ServiceConfig::from_workflow(&wf).unwrap();
+
+        // Issue has no matching labels; fallback should activate.
+        let issue = make_test_issue("2", "In-Progress", vec!["docs"]);
+        let stages = cfg.resolve_stages_for_issue(&issue);
+        assert_eq!(stages.len(), 1);
+        assert_eq!(stages[0].role.as_deref(), Some("default-implementer"));
+    }
+
+    #[test]
+    fn resolve_stages_labeled_takes_priority_over_fallback() {
+        unsafe { env::set_var("TEST_API_KEY_PP3", "key") };
+        let wf = make_workflow(
+            r#"
+tracker:
+  kind: github
+  api_key: $TEST_API_KEY_PP3
+  project_slug: owner/repo
+pipeline:
+  stages:
+    - state: in-progress
+      agent: codex
+      role: backend-implementer
+      when_labels:
+        - backend
+    - state: in-progress
+      agent: codex
+      role: default-implementer
+"#,
+        );
+        let cfg = ServiceConfig::from_workflow(&wf).unwrap();
+
+        // Issue has the backend label; labeled stage should win over fallback.
+        let issue = make_test_issue("3", "In-Progress", vec!["backend"]);
+        let stages = cfg.resolve_stages_for_issue(&issue);
+        assert_eq!(stages.len(), 1);
+        assert_eq!(stages[0].role.as_deref(), Some("backend-implementer"));
+    }
+
+    #[test]
+    fn resolve_stages_conditional_skip_missing_label() {
+        unsafe { env::set_var("TEST_API_KEY_PP4", "key") };
+        let wf = make_workflow(
+            r#"
+tracker:
+  kind: github
+  api_key: $TEST_API_KEY_PP4
+  project_slug: owner/repo
+pipeline:
+  stages:
+    - state: in-progress
+      agent: codex
+      role: backend-implementer
+      when_labels:
+        - backend
+        - urgent
+"#,
+        );
+        let cfg = ServiceConfig::from_workflow(&wf).unwrap();
+
+        // Issue only has one of the two required labels.
+        let issue = make_test_issue("4", "In-Progress", vec!["backend"]);
+        let stages = cfg.resolve_stages_for_issue(&issue);
+        assert!(stages.is_empty(), "should not match when not ALL labels present");
+    }
+
+    #[test]
+    fn resolve_stages_case_insensitive_labels() {
+        unsafe { env::set_var("TEST_API_KEY_PP5", "key") };
+        let wf = make_workflow(
+            r#"
+tracker:
+  kind: github
+  api_key: $TEST_API_KEY_PP5
+  project_slug: owner/repo
+pipeline:
+  stages:
+    - state: in-progress
+      agent: codex
+      role: backend-implementer
+      when_labels:
+        - Backend
+"#,
+        );
+        let cfg = ServiceConfig::from_workflow(&wf).unwrap();
+
+        let issue = make_test_issue("5", "In-Progress", vec!["backend"]);
+        let stages = cfg.resolve_stages_for_issue(&issue);
+        assert_eq!(stages.len(), 1, "label matching should be case-insensitive");
+    }
+
+    #[test]
+    fn resolve_stage_singular_returns_first_match() {
+        unsafe { env::set_var("TEST_API_KEY_PP6", "key") };
+        let wf = make_workflow(
+            r#"
+tracker:
+  kind: github
+  api_key: $TEST_API_KEY_PP6
+  project_slug: owner/repo
+pipeline:
+  stages:
+    - state: in-progress
+      agent: codex
+      role: default-implementer
+    - state: in-progress
+      agent: claude
+      role: second-implementer
+"#,
+        );
+        let cfg = ServiceConfig::from_workflow(&wf).unwrap();
+
+        let issue = make_test_issue("6", "In-Progress", vec![]);
+        let stage = cfg.resolve_stage_for_issue(&issue);
+        assert!(stage.is_some());
+        assert_eq!(stage.unwrap().role.as_deref(), Some("default-implementer"));
+    }
+
+    #[test]
+    fn parse_pipeline_stages_with_when_labels_and_scope() {
+        unsafe { env::set_var("TEST_API_KEY_PP7", "key") };
+        let wf = make_workflow(
+            r#"
+tracker:
+  kind: github
+  api_key: $TEST_API_KEY_PP7
+  project_slug: owner/repo
+pipeline:
+  stages:
+    - state: in-progress
+      agent: codex
+      role: backend
+      when_labels:
+        - backend
+        - rust
+      scope: crates/
+"#,
+        );
+        let cfg = ServiceConfig::from_workflow(&wf).unwrap();
+        assert_eq!(cfg.pipeline_stages.len(), 1);
+        assert_eq!(
+            cfg.pipeline_stages[0].when_labels,
+            vec!["backend".to_string(), "rust".to_string()]
+        );
+        assert_eq!(cfg.pipeline_stages[0].scope.as_deref(), Some("crates/"));
+    }
+
+    #[test]
+    fn parse_pipeline_stages_defaults_when_labels_and_scope() {
+        unsafe { env::set_var("TEST_API_KEY_PP8", "key") };
+        let wf = make_workflow(
+            r#"
+tracker:
+  kind: github
+  api_key: $TEST_API_KEY_PP8
+  project_slug: owner/repo
+pipeline:
+  stages:
+    - state: in-progress
+      agent: codex
+"#,
+        );
+        let cfg = ServiceConfig::from_workflow(&wf).unwrap();
+        assert_eq!(cfg.pipeline_stages.len(), 1);
+        assert!(
+            cfg.pipeline_stages[0].when_labels.is_empty(),
+            "when_labels should default to empty"
+        );
+        assert!(
+            cfg.pipeline_stages[0].scope.is_none(),
+            "scope should default to None"
+        );
     }
 }

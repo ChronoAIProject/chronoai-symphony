@@ -12,7 +12,8 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use symphony_agent::protocol::events::AgentEvent;
 use symphony_core::domain::{
-    CodexTotals, Issue, OrchestratorState, RunningEntry, ServiceConfig,
+    CodexTotals, Issue, OrchestratorState, PipelineStage, RunningEntry,
+    ServiceConfig,
 };
 use symphony_tracker::traits::IssueTracker;
 use symphony_workspace::manager::WorkspaceManager;
@@ -283,12 +284,42 @@ impl Orchestrator {
             .collect();
         sort_for_dispatch(&mut eligible);
 
-        // Dispatch eligible issues.
+        // Dispatch eligible issues, with parallel-stage awareness.
         for issue in eligible {
-            if self.state.running.len() as u32 >= self.state.max_concurrent_agents {
-                break;
+            let stages = self.config.resolve_stages_for_issue(&issue);
+            if stages.is_empty() {
+                // No pipeline: use existing single-dispatch logic.
+                if self.state.running.len() as u32 >= self.state.max_concurrent_agents {
+                    break;
+                }
+                self.dispatch_issue(issue, None, worker_event_tx).await;
+            } else {
+                // Pipeline with stages: dispatch each unstarted stage.
+                let stages_owned: Vec<_> = stages.into_iter().cloned().collect();
+                for stage in &stages_owned {
+                    if stage.agent == "none" {
+                        continue;
+                    }
+                    let role = stage.role.as_deref().unwrap_or(&stage.agent);
+                    let already_running = self.state.running.values().any(|entry| {
+                        entry.issue.id == issue.id
+                            && entry.stage_role.as_deref() == Some(role)
+                    });
+                    if already_running {
+                        continue;
+                    }
+                    if self.state.running.len() as u32 >= self.state.max_concurrent_agents {
+                        break;
+                    }
+                    self.dispatch_issue_with_stage(
+                        issue.clone(),
+                        None,
+                        worker_event_tx,
+                        stage,
+                    )
+                    .await;
+                }
             }
-            self.dispatch_issue(issue, None, worker_event_tx).await;
         }
     }
 
@@ -416,6 +447,7 @@ impl Orchestrator {
                 last_reported_output_tokens: 0,
                 last_reported_total_tokens: 0,
                 retry_attempt: attempt,
+                stage_role: None,
                 started_at: Utc::now(),
                 turn_count: 0,
             },
@@ -445,6 +477,114 @@ impl Orchestrator {
                 event_tx,
                 approval_queue,
                 cancel_rx,
+                None,
+                None,
+            )
+            .await;
+
+            let _ = orch_event_tx
+                .send(OrchestratorEvent::WorkerExited {
+                    issue_id: result.issue_id,
+                    reason: result.exit_reason,
+                })
+                .await;
+        });
+    }
+
+    /// Dispatch an issue to a worker task for a specific pipeline stage.
+    ///
+    /// Unlike `dispatch_issue`, this records the stage role in the running
+    /// entry and passes stage-specific scope/prompt information to the worker.
+    /// The running map key includes the role to allow multiple workers per issue.
+    async fn dispatch_issue_with_stage(
+        &mut self,
+        issue: Issue,
+        attempt: Option<u32>,
+        worker_event_tx: &mpsc::Sender<(String, AgentEvent)>,
+        stage: &PipelineStage,
+    ) {
+        let role = stage
+            .role
+            .as_deref()
+            .unwrap_or(&stage.agent)
+            .to_owned();
+        // Use "issue_id:role" as the running map key to support parallel stages.
+        let running_key = format!("{}:{}", issue.id, role);
+        let issue_id = issue.id.clone();
+
+        info!(
+            issue_id = %issue_id,
+            identifier = %issue.identifier,
+            role = %role,
+            "dispatching issue to worker (pipeline stage)"
+        );
+
+        // Resolve agent type from the stage's agent profile.
+        let agent_type_str = self
+            .config
+            .get_agent_profile(&stage.agent)
+            .map(|p| p.agent_type.to_string())
+            .unwrap_or_else(|| {
+                self.config
+                    .resolve_agent_for_issue(&issue)
+                    .agent_type
+                    .to_string()
+            });
+
+        // Add to running map with compound key.
+        self.state.running.insert(
+            running_key.clone(),
+            RunningEntry {
+                identifier: issue.identifier.clone(),
+                issue: issue.clone(),
+                agent_type: agent_type_str,
+                session_id: None,
+                codex_app_server_pid: None,
+                last_codex_message: None,
+                last_codex_event: None,
+                last_codex_timestamp: None,
+                codex_input_tokens: 0,
+                codex_output_tokens: 0,
+                codex_total_tokens: 0,
+                last_reported_input_tokens: 0,
+                last_reported_output_tokens: 0,
+                last_reported_total_tokens: 0,
+                retry_attempt: attempt,
+                stage_role: Some(role.clone()),
+                started_at: Utc::now(),
+                turn_count: 0,
+            },
+        );
+
+        // Create a cancellation channel for this worker.
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        self.state.claimed.insert(issue_id.clone());
+        self.cancel_senders.insert(running_key.clone(), cancel_tx);
+
+        // Spawn worker task.
+        let config = self.config.clone();
+        let prompt_template = self.prompt_template.clone();
+        let tracker = Arc::clone(&self.tracker);
+        let wm = Arc::clone(&self.workspace_manager);
+        let event_tx = worker_event_tx.clone();
+        let orch_event_tx = self.event_tx.clone();
+        let approval_queue = Arc::clone(&self.approval_queue);
+        let stage_role = Some(role);
+        let scope = stage.scope.clone();
+
+        tokio::spawn(async move {
+            let result = run_worker(
+                issue,
+                attempt,
+                config,
+                prompt_template,
+                tracker,
+                wm,
+                event_tx,
+                approval_queue,
+                cancel_rx,
+                stage_role,
+                scope,
             )
             .await;
 
@@ -458,12 +598,21 @@ impl Orchestrator {
     }
 
     /// Handle a worker exiting: update state and schedule retry if needed.
+    ///
+    /// The `issue_id` may be a compound key `"issue_id:role"` for pipeline
+    /// stages. The raw issue ID is extracted for the claimed set.
     fn handle_worker_exited(&mut self, issue_id: &str, reason: WorkerExitReason) {
         info!(
             issue_id = %issue_id,
             reason = ?reason,
             "worker exited"
         );
+
+        // Extract the raw issue ID from a potential compound key "id:role".
+        let raw_issue_id = issue_id
+            .split(':')
+            .next()
+            .unwrap_or(issue_id);
 
         // Clean up cancellation sender.
         self.cancel_senders.remove(issue_id);
@@ -489,7 +638,16 @@ impl Orchestrator {
         self.activity_log.remove_issue(issue_id);
 
         let entry = self.state.running.remove(issue_id);
-        self.state.claimed.remove(issue_id);
+        // Only remove from claimed if no other stages are still running for
+        // this issue.
+        let other_stages_running = self
+            .state
+            .running
+            .values()
+            .any(|e| e.issue.id == raw_issue_id);
+        if !other_stages_running {
+            self.state.claimed.remove(raw_issue_id);
+        }
 
         match reason {
             WorkerExitReason::Normal => {

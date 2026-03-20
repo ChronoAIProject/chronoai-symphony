@@ -121,6 +121,34 @@ agents:
 #       transition_to: code-review
 #     - state: human-review
 #       agent: none                         # No agent runs - handoff to human
+#
+# Parallel stages with conditional routing (when_labels + scope):
+# Multiple stages can share the same state. Use `when_labels` to activate
+# stages conditionally based on issue labels. Stages without `when_labels`
+# act as fallbacks when no labeled stage matches.
+#
+# pipeline:
+#   stages:
+#     - state: in-progress
+#       agent: codex
+#       role: backend-implementer
+#       when_labels: [backend]              # Only if issue has "backend" label
+#       scope: backend/                     # Hint: focus on this directory
+#       transition_to: code-review
+#     - state: in-progress
+#       agent: claude
+#       role: frontend-implementer
+#       when_labels: [frontend]             # Only if issue has "frontend" label
+#       scope: frontend/src
+#       transition_to: code-review
+#     - state: in-progress
+#       agent: codex
+#       role: default-implementer           # Fallback: no when_labels
+#       transition_to: code-review
+#
+# If an issue has both "backend" and "frontend" labels, both the backend
+# and frontend stages run in parallel. If it has neither, the fallback
+# (default-implementer) runs instead.
 
 server:
   port: 8080

@@ -658,6 +658,57 @@ pipeline:
 | `{{ stage.reject_to }}` | Next state on rejection |
 | `{{ default_prompt }}` | The rendered WORKFLOW.md body (only in stage prompt overrides) |
 
+### Parallel agents and conditional stages
+
+Multiple stages can share the same state. Use `when_labels` to activate stages conditionally based on issue labels, and `scope` to tell each agent where to focus:
+
+```yaml
+pipeline:
+  stages:
+    # Conditional: only runs for issues with "needs-architect" label
+    - state: architect
+      agent: claude
+      role: architect
+      when_labels: [needs-architect]
+      transition_to: in-progress
+
+    # Parallel: both run simultaneously when issue has both labels
+    - state: in-progress
+      agent: codex
+      role: backend-dev
+      when_labels: [backend]
+      scope: backend/
+      transition_to: code-review
+
+    - state: in-progress
+      agent: claude
+      role: frontend-dev
+      when_labels: [frontend]
+      scope: frontend/
+      transition_to: code-review
+
+    # Fallback: runs when no labeled stage matches
+    - state: in-progress
+      agent: codex
+      role: implementer
+      transition_to: code-review
+```
+
+**How it works:**
+
+| Issue labels | What happens |
+|---|---|
+| `backend` + `frontend` | Both backend and frontend stages run **in parallel** |
+| `backend` only | Only the backend stage runs |
+| `frontend` only | Only the frontend stage runs |
+| No matching labels | The fallback stage (no `when_labels`) runs |
+| `needs-architect` | Architect stage runs before implementation |
+
+- `when_labels` are user-defined GitHub labels, not hardcoded. Any label name works.
+- Stages **with** `when_labels` take priority over fallback stages (those without).
+- `scope` is appended to the prompt as a hint: "Focus your changes on the `backend/` directory."
+- Each parallel worker gets its own session, activity feed, and token tracking in the dashboard.
+
 **Key differences between agent types:**
 
 | | Codex (`codex`) | Claude Code (`claude-cli`) |

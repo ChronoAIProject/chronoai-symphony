@@ -104,6 +104,7 @@ mod tests {
             last_reported_output_tokens: 0,
             last_reported_total_tokens: 0,
             retry_attempt: None,
+            stage_role: None,
             started_at: Utc::now(),
             turn_count: 0,
         }

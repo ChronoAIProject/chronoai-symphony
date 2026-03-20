@@ -107,16 +107,43 @@ pub fn is_dispatch_eligible(
         return false;
     }
 
-    // Must not already be running.
-    if state.running.contains_key(&issue.id) {
-        debug!(issue_id = %issue.id, "skipping issue: already running");
-        return false;
-    }
-
-    // Must not be claimed.
-    if state.claimed.contains(&issue.id) {
-        debug!(issue_id = %issue.id, "skipping issue: already claimed");
-        return false;
+    // Check running/claimed status, with parallel-stage awareness.
+    let stages = config.resolve_stages_for_issue(issue);
+    if !stages.is_empty() {
+        // Pipeline mode: an issue can be dispatched multiple times if it has
+        // multiple stages. Check whether ALL non-none stages are already running.
+        let actionable_stages: Vec<_> = stages
+            .iter()
+            .filter(|s| s.agent != "none")
+            .collect();
+        if !actionable_stages.is_empty() {
+            let all_stages_running = actionable_stages.iter().all(|s| {
+                let role = s.role.as_deref().unwrap_or(&s.agent);
+                state.running.values().any(|e| {
+                    e.issue.id == issue.id
+                        && e.stage_role.as_deref() == Some(role)
+                })
+            });
+            if all_stages_running {
+                debug!(
+                    issue_id = %issue.id,
+                    "skipping issue: all pipeline stages already running"
+                );
+                return false;
+            }
+        }
+        // Don't check claimed set for pipeline issues; per-stage check above
+        // handles it.
+    } else {
+        // Legacy: check running and claimed sets.
+        if state.running.contains_key(&issue.id) {
+            debug!(issue_id = %issue.id, "skipping issue: already running");
+            return false;
+        }
+        if state.claimed.contains(&issue.id) {
+            debug!(issue_id = %issue.id, "skipping issue: already claimed");
+            return false;
+        }
     }
 
     // Concurrency limits.
@@ -196,7 +223,7 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
     use std::collections::{HashMap, HashSet};
-    use symphony_core::domain::{AgentProfileConfig, AgentType, BlockerRef, CodexTotals, HooksConfig, RunningEntry};
+    use symphony_core::domain::{AgentProfileConfig, AgentType, BlockerRef, CodexTotals, HooksConfig, PipelineStage, RunningEntry};
 
     fn empty_state() -> OrchestratorState {
         OrchestratorState {
@@ -348,6 +375,7 @@ mod tests {
                 last_reported_output_tokens: 0,
                 last_reported_total_tokens: 0,
                 retry_attempt: None,
+                stage_role: None,
                 started_at: Utc::now(),
                 turn_count: 0,
             },
@@ -445,5 +473,150 @@ mod tests {
         let config = default_config();
         let issue = make_issue("1", "todo", Some(1));
         assert!(is_dispatch_eligible(&issue, &state, &config));
+    }
+
+    // -----------------------------------------------------------------------
+    // Parallel dispatch tests
+    // -----------------------------------------------------------------------
+
+    fn pipeline_config_with_two_stages() -> ServiceConfig {
+        let mut config = default_config();
+        config.tracker_active_states = vec![
+            "Todo".to_string(),
+            "In Progress".to_string(),
+        ];
+        config.pipeline_stages = vec![
+            PipelineStage {
+                state: "in progress".to_string(),
+                agent: "codex".to_string(),
+                role: Some("backend-implementer".to_string()),
+                prompt: None,
+                transition_to: None,
+                reject_to: None,
+                when_labels: vec!["backend".to_string()],
+                scope: Some("backend/".to_string()),
+            },
+            PipelineStage {
+                state: "in progress".to_string(),
+                agent: "claude".to_string(),
+                role: Some("frontend-implementer".to_string()),
+                prompt: None,
+                transition_to: None,
+                reject_to: None,
+                when_labels: vec!["frontend".to_string()],
+                scope: Some("frontend/".to_string()),
+            },
+        ];
+        config
+    }
+
+    #[test]
+    fn parallel_dispatch_eligible_when_no_stages_running() {
+        let state = empty_state();
+        let config = pipeline_config_with_two_stages();
+        let mut issue = make_issue("1", "In Progress", Some(1));
+        issue.labels = vec!["backend".to_string(), "frontend".to_string()];
+        assert!(is_dispatch_eligible(&issue, &state, &config));
+    }
+
+    #[test]
+    fn parallel_dispatch_eligible_when_one_stage_running() {
+        let mut state = empty_state();
+        let config = pipeline_config_with_two_stages();
+        let mut issue = make_issue("1", "In Progress", Some(1));
+        issue.labels = vec!["backend".to_string(), "frontend".to_string()];
+
+        // Mark one stage as running.
+        let entry = RunningEntry {
+            identifier: "#1".to_string(),
+            issue: issue.clone(),
+            agent_type: "codex".to_string(),
+            session_id: None,
+            codex_app_server_pid: None,
+            last_codex_message: None,
+            last_codex_event: None,
+            last_codex_timestamp: None,
+            codex_input_tokens: 0,
+            codex_output_tokens: 0,
+            codex_total_tokens: 0,
+            last_reported_input_tokens: 0,
+            last_reported_output_tokens: 0,
+            last_reported_total_tokens: 0,
+            retry_attempt: None,
+            stage_role: Some("backend-implementer".to_string()),
+            started_at: Utc::now(),
+            turn_count: 0,
+        };
+        state.running.insert("1:backend-implementer".to_string(), entry);
+
+        // Issue should still be eligible because frontend stage is not running.
+        assert!(is_dispatch_eligible(&issue, &state, &config));
+    }
+
+    #[test]
+    fn parallel_dispatch_ineligible_when_all_stages_running() {
+        let mut state = empty_state();
+        let config = pipeline_config_with_two_stages();
+        let mut issue = make_issue("1", "In Progress", Some(1));
+        issue.labels = vec!["backend".to_string(), "frontend".to_string()];
+
+        // Mark both stages as running.
+        state.running.insert(
+            "1:backend-implementer".to_string(),
+            RunningEntry {
+                identifier: "#1".to_string(),
+                issue: issue.clone(),
+                agent_type: "codex".to_string(),
+                session_id: None,
+                codex_app_server_pid: None,
+                last_codex_message: None,
+                last_codex_event: None,
+                last_codex_timestamp: None,
+                codex_input_tokens: 0,
+                codex_output_tokens: 0,
+                codex_total_tokens: 0,
+                last_reported_input_tokens: 0,
+                last_reported_output_tokens: 0,
+                last_reported_total_tokens: 0,
+                retry_attempt: None,
+                stage_role: Some("backend-implementer".to_string()),
+                started_at: Utc::now(),
+                turn_count: 0,
+            },
+        );
+        state.running.insert(
+            "1:frontend-implementer".to_string(),
+            RunningEntry {
+                identifier: "#1".to_string(),
+                issue: issue.clone(),
+                agent_type: "claude".to_string(),
+                session_id: None,
+                codex_app_server_pid: None,
+                last_codex_message: None,
+                last_codex_event: None,
+                last_codex_timestamp: None,
+                codex_input_tokens: 0,
+                codex_output_tokens: 0,
+                codex_total_tokens: 0,
+                last_reported_input_tokens: 0,
+                last_reported_output_tokens: 0,
+                last_reported_total_tokens: 0,
+                retry_attempt: None,
+                stage_role: Some("frontend-implementer".to_string()),
+                started_at: Utc::now(),
+                turn_count: 0,
+            },
+        );
+
+        assert!(!is_dispatch_eligible(&issue, &state, &config));
+    }
+
+    #[test]
+    fn legacy_dispatch_still_checks_claimed() {
+        let mut state = empty_state();
+        let config = default_config(); // No pipeline stages.
+        let issue = make_issue("1", "Todo", Some(1));
+        state.claimed.insert("1".to_string());
+        assert!(!is_dispatch_eligible(&issue, &state, &config));
     }
 }
