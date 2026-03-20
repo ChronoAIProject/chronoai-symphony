@@ -653,6 +653,38 @@ impl Orchestrator {
             WorkerExitReason::Normal => {
                 info!(issue_id = %issue_id, "worker completed normally");
                 self.state.completed.insert(issue_id.to_string());
+
+                // Auto-transition: when ALL parallel stages for an issue finish
+                // normally, move the issue to the next pipeline state.
+                if !other_stages_running {
+                    if let Some(ref entry_ref) = entry {
+                        let stages = self.config.resolve_stages_for_issue(&entry_ref.issue);
+                        // Find the transition_to from any matching stage
+                        let transition = stages.iter()
+                            .find(|s| s.agent != "none")
+                            .and_then(|s| s.transition_to.as_ref());
+                        if let Some(next_state) = transition {
+                            let current_state = &entry_ref.issue.state;
+                            let next_lower = next_state.to_lowercase().replace(' ', "-");
+                            let current_lower = current_state.to_lowercase().replace(' ', "-");
+                            info!(
+                                issue_id = %raw_issue_id,
+                                from = %current_lower,
+                                to = %next_lower,
+                                "auto-transitioning issue to next pipeline state"
+                            );
+                            let tracker = Arc::clone(&self.tracker);
+                            let id = raw_issue_id.to_string();
+                            let add = vec![next_lower.clone()];
+                            let remove = vec![current_lower];
+                            tokio::spawn(async move {
+                                if let Err(e) = tracker.update_issue_labels(&id, &add, &remove).await {
+                                    warn!(error = %e, "failed to auto-transition issue labels");
+                                }
+                            });
+                        }
+                    }
+                }
             }
             WorkerExitReason::Abnormal(ref err_msg) => {
                 let max_retries = 3u32; // Could be made configurable.

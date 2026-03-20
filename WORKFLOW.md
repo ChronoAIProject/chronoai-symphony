@@ -238,8 +238,7 @@ gh api repos/{owner}/{repo}/issues/comments/{comment_id} -X PATCH -f body="## Sy
 3. Implement the changes. Update the workpad as tasks complete.
 4. Run tests relevant to your changes. Fix only test failures caused by your changes.
 5. Commit and push to the branch. Create a PR if one doesn't exist (see Git Workflow).
-6. **STOP implementing.** Update the **issue** label (NOT the PR):
-   `gh issue edit {{ issue.identifier }} --remove-label in-progress --add-label code-review`
+6. **STOP implementing.** {% if stage.transition_to %}Symphony will automatically move the issue to `{{ stage.transition_to }}` when all parallel agents finish.{% else %}Update the **issue** label: `gh issue edit {{ issue.identifier }} --remove-label in-progress --add-label code-review`{% endif %}
 
 ## Rework Flow
 
@@ -249,8 +248,7 @@ When state is `rework`:
 2. Address **only** the comments raised. Do not fix unrelated things.
 3. Run tests relevant to your fixes.
 4. Push fixes to the same branch.
-5. **STOP.** Update the **issue** label (NOT the PR):
-   `gh issue edit {{ issue.identifier }} --remove-label rework --add-label code-review`
+5. **STOP.** {% if stage.transition_to %}Symphony will automatically move the issue to `{{ stage.transition_to }}`.{% else %}Update the **issue** label: `gh issue edit {{ issue.identifier }} --remove-label rework --add-label code-review`{% endif %}
 
 {% if issue.labels.size > 0 %}
 ## Labels

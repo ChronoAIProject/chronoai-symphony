@@ -353,6 +353,75 @@ impl IssueTracker for GitHubClient {
         );
         Ok(results)
     }
+
+    async fn update_issue_labels(
+        &self,
+        identifier: &str,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<(), SymphonyError> {
+        let number = match extract_issue_number(identifier) {
+            Some(n) => n,
+            None => {
+                warn!(identifier = %identifier, "cannot extract issue number for label update");
+                return Ok(());
+            }
+        };
+        let token = self.get_token().await?;
+
+        // Add labels
+        if !add.is_empty() {
+            let url = format!(
+                "{}/repos/{}/{}/issues/{}/labels",
+                self.endpoint, self.owner, self.repo, number
+            );
+            let body = serde_json::json!({ "labels": add });
+            let resp = self.http
+                .post(&url)
+                .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| SymphonyError::TrackerApiRequest {
+                    detail: format!("failed to add labels: {e}"),
+                })?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                warn!(status = %status, body = %body, "failed to add labels");
+            }
+        }
+
+        // Remove labels one by one (GitHub API requires individual DELETE calls)
+        for label in remove {
+            let url = format!(
+                "{}/repos/{}/{}/issues/{}/labels/{}",
+                self.endpoint, self.owner, self.repo, number,
+                label.replace(' ', "%20").replace('#', "%23")
+            );
+            let resp = self.http
+                .delete(&url)
+                .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+                .send()
+                .await
+                .map_err(|e| SymphonyError::TrackerApiRequest {
+                    detail: format!("failed to remove label {label}: {e}"),
+                })?;
+            // 404 is OK - label might not exist
+            if !resp.status().is_success() && resp.status().as_u16() != 404 {
+                let status = resp.status();
+                warn!(status = %status, label = %label, "failed to remove label");
+            }
+        }
+
+        info!(
+            identifier = %identifier,
+            added = ?add,
+            removed = ?remove,
+            "updated issue labels"
+        );
+        Ok(())
+    }
 }
 
 /// Parse an `"owner/repo"` slug into its two components.

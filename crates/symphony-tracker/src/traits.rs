@@ -32,4 +32,18 @@ pub trait IssueTracker: Send + Sync {
         &self,
         ids: &[String],
     ) -> Result<Vec<Issue>, SymphonyError>;
+
+    /// Update labels on an issue. Adds and removes labels in a single operation.
+    /// Used by the orchestrator to auto-transition pipeline states.
+    ///
+    /// `identifier` is the issue identifier (e.g., "#82").
+    /// Default implementation does nothing (for trackers that don't support writes).
+    async fn update_issue_labels(
+        &self,
+        _identifier: &str,
+        _add: &[String],
+        _remove: &[String],
+    ) -> Result<(), SymphonyError> {
+        Ok(())
+    }
 }
