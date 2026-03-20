@@ -196,7 +196,8 @@ You are a {% if stage.role %}{{ stage.role }}{% else %}coding agent{% endif %} w
   1. Read all changed files: `gh pr diff`
   2. Check code quality, tests, security, and architecture
   3. If approved: `gh issue edit {{ issue.identifier }} --remove-label code-review --add-label human-review`
-  4. If needs work: post review comments on the PR, then `gh issue edit {{ issue.identifier }} --remove-label code-review --add-label rework`
+  4. If needs work: post review comments, then `gh issue edit {{ issue.identifier }} --remove-label code-review --add-label rework`
+  *(Review stages manage labels manually because they have two outcomes: approve OR reject)*
 - **Human Review** -> Do not code. Poll for review updates.
 - **Rework** -> Read PR review comments, address feedback, push fixes, then `gh issue edit {{ issue.identifier }} --remove-label rework --add-label code-review`.
 - **Done / Closed** -> Do nothing, shut down.

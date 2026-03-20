@@ -656,12 +656,15 @@ impl Orchestrator {
 
                 // Auto-transition: when ALL parallel stages for an issue finish
                 // normally, move the issue to the next pipeline state.
+                // Only auto-transition for single-outcome stages (no reject_to).
+                // Stages with reject_to (e.g., code-review) have two possible
+                // outcomes and must manage labels themselves.
                 if !other_stages_running {
                     if let Some(ref entry_ref) = entry {
                         let stages = self.config.resolve_stages_for_issue(&entry_ref.issue);
-                        // Find the transition_to from any matching stage
+                        // Find a matching stage that has transition_to but NO reject_to
                         let transition = stages.iter()
-                            .find(|s| s.agent != "none")
+                            .find(|s| s.agent != "none" && s.reject_to.is_none())
                             .and_then(|s| s.transition_to.as_ref());
                         if let Some(next_state) = transition {
                             let current_state = &entry_ref.issue.state;
