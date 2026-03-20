@@ -71,18 +71,29 @@ pub async fn reconcile_running_issues(
         return actions;
     }
 
-    let issue_ids: Vec<String> = state.running.keys().cloned().collect();
+    let running_keys: Vec<String> = state.running.keys().cloned().collect();
 
-    match tracker.fetch_issue_states_by_ids(&issue_ids).await {
+    // Strip ":role" suffix from compound keys (e.g., "#82:triage" -> "#82")
+    // for tracker lookups. The tracker only knows raw issue IDs.
+    let raw_issue_ids: Vec<String> = running_keys
+        .iter()
+        .map(|key| key.split(':').next().unwrap_or(key).to_string())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    match tracker.fetch_issue_states_by_ids(&raw_issue_ids).await {
         Ok(current_issues) => {
-            // Build a lookup from issue ID to current state.
+            // Build a lookup from raw issue ID to current state.
             let state_lookup: std::collections::HashMap<String, String> = current_issues
                 .iter()
                 .map(|issue| (issue.id.clone(), issue.state.clone()))
                 .collect();
 
-            for issue_id in &issue_ids {
-                match state_lookup.get(issue_id) {
+            for issue_id in &running_keys {
+                // Extract the raw issue ID from the compound key for lookup.
+                let raw_id = issue_id.split(':').next().unwrap_or(issue_id);
+                match state_lookup.get(raw_id) {
                     Some(current_state) => {
                         let normalized = normalize_state(current_state);
 
