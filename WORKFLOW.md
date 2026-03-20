@@ -91,37 +91,34 @@ agents:
 #
 # pipeline:
 #   stages:
-#     # Architect stage: only for issues labeled "architect".
-#     # A maintainer adds "architect" when the issue is complex.
-#     # Issues without "architect" skip straight to implementation.
-#     - state: in-progress
+#     # Triage: Claude assesses the issue, plans if complex, adds routing labels.
+#     - state: todo
 #       agent: claude
-#       role: architect
-#       when_labels: [architect]            # Only if maintainer adds this label
+#       role: triage
 #       prompt: |
-#         You are a software architect. Analyze {{ issue.identifier }}: {{ issue.title }}.
+#         You are a senior technical lead triaging {{ issue.identifier }}.
 #         {{ issue.description }}
-#         Create a detailed implementation plan. Do NOT write code.
-#         Post the plan as a Symphony Workpad comment, then remove the
-#         `architect` label so the implementer picks it up on the next cycle.
-#       transition_to: in-progress          # Stays in-progress, but without
-#                                           # "architect" label the fallback runs next
+#         1. Assess what needs to change and which parts are affected.
+#         2. Add labels: `backend`, `frontend`, or both (for parallel agents).
+#         3. If complex: create a workpad comment with an implementation plan.
+#         4. Move to in-progress: `gh issue edit {{ issue.identifier }} --remove-label todo --add-label in-progress`
+#       transition_to: in-progress
 #
-#     # Parallel: backend + frontend agents when issue has both labels
+#     # Parallel: backend + frontend agents when triage adds both labels
 #     - state: in-progress
 #       agent: codex
 #       role: backend-implementer
-#       when_labels: [backend]              # Only if issue has "backend" label
-#       scope: backend/                     # Hint: focus on this directory
+#       when_labels: [backend]
+#       scope: backend/
 #       transition_to: code-review
 #     - state: in-progress
 #       agent: claude
 #       role: frontend-implementer
-#       when_labels: [frontend]             # Only if issue has "frontend" label
+#       when_labels: [frontend]
 #       scope: frontend/
 #       transition_to: code-review
 #
-#     # Fullstack fallback: no backend/frontend label = one agent does it all
+#     # Fullstack fallback: triage didn't add backend/frontend labels
 #     - state: in-progress
 #       agent: codex
 #       role: implementer
@@ -144,12 +141,9 @@ agents:
 #     - state: human-review
 #       agent: none
 #
-# How the architect flow works:
-# 1. Maintainer creates issue, adds labels: symphony + architect
-# 2. Symphony dispatches Claude as architect (when_labels: [architect] matches)
-# 3. Claude creates implementation plan, removes "architect" label
-# 4. Next poll: "architect" label gone, fallback implementer stage runs
-# 5. No extra state needed - the label presence/absence controls routing
+# Flow: Todo (triage) → In Progress (implement) → Code Review → Human Review → Done
+# The triage agent decides if architecture planning is needed and which
+# implementation agents to dispatch. No manual label management required.
 
 server:
   port: 8080

@@ -665,18 +665,18 @@ Multiple stages can share the same state. Use `when_labels` to activate stages c
 ```yaml
 pipeline:
   stages:
-    # Architect: runs when maintainer adds "architect" label.
-    # Removes the label when done so the implementer picks it up.
-    - state: in-progress
+    # Triage: Claude assesses the issue, plans if complex, adds routing labels
+    - state: todo
       agent: claude
-      role: architect
-      when_labels: [architect]
+      role: triage
       prompt: |
-        Analyze {{ issue.identifier }}. Create an implementation plan.
-        Do NOT write code. Post the plan, then remove the `architect` label.
+        Assess {{ issue.identifier }}. Determine affected areas.
+        Add labels: `backend`, `frontend`, or both.
+        If complex: create an implementation plan.
+        Move to in-progress.
       transition_to: in-progress
 
-    # Parallel: both run simultaneously when issue has both labels
+    # Parallel: both run simultaneously when triage adds both labels
     - state: in-progress
       agent: codex
       role: backend-dev
@@ -691,7 +691,7 @@ pipeline:
       scope: frontend/
       transition_to: code-review
 
-    # Fallback: runs when no labeled stage matches
+    # Fallback: runs when triage didn't add routing labels
     - state: in-progress
       agent: codex
       role: implementer
@@ -700,18 +700,34 @@ pipeline:
 
 **How it works:**
 
-| Issue labels | What happens |
+```mermaid
+graph TB
+    Todo["Todo<br/>(Claude triage)"] -->|"assesses issue,<br/>adds routing labels"| IP
+    subgraph IP["In Progress"]
+        direction LR
+        BE["Backend<br/>(Codex)"]
+        FE["Frontend<br/>(Claude)"]
+        FS["Fullstack<br/>(Codex)"]
+    end
+    IP --> CR["Code Review<br/>(Claude)"]
+    CR -->|approved| HR["Human Review"]
+    CR -->|needs work| RW["Rework<br/>(Codex)"]
+    RW --> CR
+    HR --> Done
+```
+
+| Triage result | What happens |
 |---|---|
-| `architect` | Claude creates implementation plan, removes label, then implementer runs next cycle |
-| `backend` + `frontend` | Both agents run **in parallel**, each scoped to their directory |
-| `backend` only | Only the backend stage runs |
-| `frontend` only | Only the frontend stage runs |
-| No matching labels | The fallback stage (no `when_labels`) runs |
+| Adds `backend` + `frontend` | Both agents run **in parallel**, each scoped to their directory |
+| Adds `backend` only | Only the backend stage runs |
+| Adds `frontend` only | Only the frontend stage runs |
+| Adds neither | The fallback fullstack agent runs |
+| Complex issue | Triage creates architecture plan in workpad before moving to in-progress |
 
 **Key points:**
+- The **triage agent** (Claude on `todo`) is the smart router. It reads the issue, assesses complexity, creates plans for complex work, and adds routing labels. No manual label management needed.
 - `when_labels` are user-defined GitHub labels. Any label name works.
 - Stages **with** `when_labels` take priority over fallbacks (those without).
-- The **architect pattern** works by label presence: the architect removes its own label when done, so the next dispatch cycle picks up the fallback implementer instead.
 - `scope` is appended to the prompt: "Focus your changes on the `backend/` directory."
 - Each parallel worker gets its own session, activity feed, and token tracking in the dashboard.
 
