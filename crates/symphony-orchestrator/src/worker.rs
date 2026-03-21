@@ -147,8 +147,14 @@ pub async fn run_worker(
     // Step 2a: Append scope hint to the prompt if provided.
     let rendered_prompt = if let Some(ref scope_dir) = scope {
         format!(
-            "{}\n\n## Scope\n\nFocus your changes on the `{}` directory. \
-             Other agents may be working on other parts of the codebase simultaneously.\n",
+            "{}\n\n## Parallel Agent Scope\n\n\
+             You are working in parallel with other agents on the same issue and branch.\n\n\
+             **Your scope:** Only modify files in the `{}` directory.\n\
+             **Do NOT** modify files outside your scope - another agent owns those.\n\
+             **Do NOT** be alarmed by uncommitted changes or new commits from the other agent.\n\
+             **Git:** Pull before committing (`git pull --rebase`) to avoid merge conflicts.\n\
+             **PR:** Check if a PR already exists before creating one. Only create if none exists.\n\
+             **Tests:** Only run and fix tests related to your scope.\n",
             rendered_prompt, scope_dir
         )
     } else {
