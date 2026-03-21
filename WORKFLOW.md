@@ -213,24 +213,36 @@ You are a {% if stage.role %}{{ stage.role }}{% else %}coding agent{% endif %} w
 
 **IMPORTANT:** All agents working on the same issue share the same branch and PR. Do NOT create separate branches or PRs.
 
-## Symphony Workpad (Single Persistent Comment)
+## Symphony Workpad
 
-Use exactly ONE persistent comment on the issue as your workpad. NEVER create additional comments for updates.
+Use ONE persistent comment per agent role on the issue as your workpad. NEVER create additional comments for updates.
+
+{% if stage.role %}**Your workpad marker:** `## Symphony Workpad ({{ stage.role }})`{% else %}**Your workpad marker:** `## Symphony Workpad`{% endif %}
 
 **Finding or creating the workpad:**
-1. Search existing comments for `## Symphony Workpad`: `gh api repos/{owner}/{repo}/issues/{number}/comments --jq '.[] | select(.body | contains("## Symphony Workpad")) | .id'`
-2. If found, reuse that comment ID for ALL updates.
-3. If not found, create it once: `gh issue comment {number} --body "## Symphony Workpad\n- [ ] Planning\n- [ ] Implementation\n- [ ] Tests\n- [ ] Validation"`
-4. Save the comment ID and use it for every update.
+```bash
+# Search for your workpad (use your role-specific marker)
+{% if stage.role %}MARKER="## Symphony Workpad ({{ stage.role }})"{% else %}MARKER="## Symphony Workpad"{% endif %}
+COMMENT_ID=$(gh api repos/{owner}/{repo}/issues/{{ issue.identifier | remove: "#" }}/comments --jq ".[] | select(.body | contains(\"$MARKER\")) | .id")
+if [ -z "$COMMENT_ID" ]; then
+  # Create new workpad
+  gh issue comment {{ issue.identifier }} --body "$MARKER
+- [ ] Planning
+- [ ] Implementation
+- [ ] Tests
+- [ ] Validation"
+  COMMENT_ID=$(gh api repos/{owner}/{repo}/issues/{{ issue.identifier | remove: "#" }}/comments --jq ".[] | select(.body | contains(\"$MARKER\")) | .id")
+fi
+```
 
 **Updating the workpad (NEVER create a new comment):**
 ```bash
-gh api repos/{owner}/{repo}/issues/comments/{comment_id} -X PATCH -f body="## Symphony Workpad
+gh api repos/{owner}/{repo}/issues/comments/$COMMENT_ID -X PATCH -f body="$MARKER
 - [x] Task 1 - completed
-- [x] Task 2 - completed
-- [ ] Tests
-- [ ] Validation"
+- [ ] Next task"
 ```
+
+When working in parallel, each agent has its own workpad comment (e.g., `## Symphony Workpad (backend-implementer)` and `## Symphony Workpad (frontend-implementer)`).
 
 ## Execution Flow (In Progress)
 
