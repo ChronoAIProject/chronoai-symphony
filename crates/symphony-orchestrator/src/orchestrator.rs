@@ -670,16 +670,30 @@ impl Orchestrator {
                             let current_state = &entry_ref.issue.state;
                             let next_lower = next_state.to_lowercase().replace(' ', "-");
                             let current_lower = current_state.to_lowercase().replace(' ', "-");
+
+                            // Collect routing labels (when_labels) from all matched
+                            // stages to remove them during transition. This prevents
+                            // backend/frontend labels from persisting into code-review
+                            // and causing incorrect re-dispatch during rework.
+                            let mut remove = vec![current_lower];
+                            for stage in &stages {
+                                for label in &stage.when_labels {
+                                    let l = label.to_lowercase().replace(' ', "-");
+                                    if !remove.contains(&l) {
+                                        remove.push(l);
+                                    }
+                                }
+                            }
+
                             info!(
                                 issue_id = %raw_issue_id,
-                                from = %current_lower,
+                                from = ?remove,
                                 to = %next_lower,
                                 "auto-transitioning issue to next pipeline state"
                             );
                             let tracker = Arc::clone(&self.tracker);
                             let id = raw_issue_id.to_string();
                             let add = vec![next_lower.clone()];
-                            let remove = vec![current_lower];
                             tokio::spawn(async move {
                                 if let Err(e) = tracker.update_issue_labels(&id, &add, &remove).await {
                                     warn!(error = %e, "failed to auto-transition issue labels");
