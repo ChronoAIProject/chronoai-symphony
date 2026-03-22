@@ -454,11 +454,12 @@ function render(data){
       let id=esc(e.issue_identifier||e.identifier||"");
       let agentType=esc(e.agent_type||"codex");
       let agentBadge=agentType==="claude-cli"?"<span class=\"state-badge\" style=\"font-size:0.7rem;padding:0.15rem 0.45rem;margin-left:0.3rem;background:#f0e6ff;border-color:#c8a2f0;color:#6b21a8\">Claude</span>":"<span class=\"state-badge\" style=\"font-size:0.7rem;padding:0.15rem 0.45rem;margin-left:0.3rem\">Codex</span>";
-      let issueKey=e.issue_id||id;
+      let issueKey=(e.issue_id||id).replace(/[^a-zA-Z0-9_-]/g,"_");
       let activityLog=e.activity||e.activity_log||[];
       let hasActivity=activityLog.length>0;
+      let stageRole=e.stage_role?`<span class="muted" style="font-size:0.78rem;margin-left:0.3rem">(${esc(e.stage_role)})</span>`:"";
       html+=`<tr>
-        <td><div class="issue-stack"><span class="issue-id">${id}${agentBadge}</span>
+        <td><div class="issue-stack"><span class="issue-id">${id}${agentBadge}${stageRole}</span>
           <a class="issue-link" href="/api/v1/${encodeURIComponent(id)}">JSON details</a>`;
       if(hasActivity){
         html+=`<button class="activity-toggle" onclick="toggleActivity('${esc(issueKey)}')">${expandedActivities[issueKey]?"Hide activity":"Activity ("+activityLog.length+")"}</button>`;

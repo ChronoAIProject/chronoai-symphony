@@ -18,7 +18,7 @@ use symphony_core::domain::{
 use symphony_tracker::traits::IssueTracker;
 use symphony_workspace::manager::WorkspaceManager;
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::activity_log::{ActivityEntry, ActivityLog};
 use crate::approval_queue::PendingApprovalQueue;
@@ -295,6 +295,27 @@ impl Orchestrator {
                 self.dispatch_issue(issue, None, worker_event_tx).await;
             } else {
                 // Pipeline with stages: dispatch each unstarted stage.
+                // But first, check if this issue has a worker running for a
+                // DIFFERENT state (e.g., code-review worker still running but
+                // issue moved to rework). Don't dispatch new state while old
+                // state's worker is still active.
+                let issue_state_norm = issue.state.to_lowercase().replace('-', " ");
+                let has_worker_for_different_state = self.state.running.values().any(|entry| {
+                    let raw_id = entry.issue.id.as_str();
+                    raw_id == issue.id && {
+                        let entry_state = entry.issue.state.to_lowercase().replace('-', " ");
+                        entry_state != issue_state_norm
+                    }
+                });
+                if has_worker_for_different_state {
+                    debug!(
+                        issue_id = %issue.id,
+                        state = %issue.state,
+                        "skipping dispatch: worker for previous state still running"
+                    );
+                    continue;
+                }
+
                 let stages_owned: Vec<_> = stages.into_iter().cloned().collect();
                 for stage in &stages_owned {
                     if stage.agent == "none" {
@@ -949,6 +970,7 @@ impl Orchestrator {
                     "issue_identifier": e.identifier,
                     "identifier": e.identifier,
                     "agent_type": e.agent_type,
+                    "stage_role": e.stage_role,
                     "state": e.issue.state,
                     "session_id": e.session_id,
                     "turn_count": e.turn_count,
