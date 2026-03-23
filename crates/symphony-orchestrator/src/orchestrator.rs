@@ -322,11 +322,26 @@ impl Orchestrator {
                         continue;
                     }
                     let role = stage.role.as_deref().unwrap_or(&stage.agent);
+                    let compound_key = format!("{}:{}", issue.id, role);
+
                     let already_running = self.state.running.values().any(|entry| {
                         entry.issue.id == issue.id
                             && entry.stage_role.as_deref() == Some(role)
                     });
                     if already_running {
+                        continue;
+                    }
+
+                    // Don't re-dispatch a stage that already completed for
+                    // this issue in this state cycle. This prevents finished
+                    // parallel agents from being re-dispatched while their
+                    // sibling is still running.
+                    if self.state.completed.contains(&compound_key) {
+                        debug!(
+                            issue_id = %issue.id,
+                            role = %role,
+                            "skipping dispatch: stage already completed"
+                        );
                         continue;
                     }
                     if self.state.running.len() as u32 >= self.state.max_concurrent_agents {
@@ -705,6 +720,13 @@ impl Orchestrator {
                                     }
                                 }
                             }
+
+                            // Clear completed entries for this issue so stages
+                            // in the new state can be dispatched fresh.
+                            let prefix = format!("{}:", raw_issue_id);
+                            self.state.completed.retain(|k| {
+                                !k.starts_with(&prefix) && k != raw_issue_id
+                            });
 
                             info!(
                                 issue_id = %raw_issue_id,
