@@ -178,15 +178,17 @@ async fn main() -> Result<()> {
             "wrote GitHub App token to file"
         );
 
-        // Spawn a background task to refresh the token every 30 minutes.
-        // Updates both the file and env vars (for newly spawned processes).
+        // Spawn a background task to refresh the token every 45 minutes.
+        // Uses force_refresh() to always generate a new token, not return
+        // the cached one. Installation tokens last 1 hour, so refreshing
+        // at 45 minutes ensures the file/env always have a valid token.
         let refresh_provider = Arc::clone(provider);
         let refresh_token_path = token_file_path.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1800));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(2700));
             loop {
                 interval.tick().await;
-                match refresh_provider.get_token().await {
+                match refresh_provider.force_refresh().await {
                     Ok(new_token) => {
                         // Update the token file (running agents read from this).
                         if let Err(e) = std::fs::write(&refresh_token_path, &new_token) {

@@ -94,6 +94,13 @@ impl GitHubAppTokenProvider {
         Ok(token)
     }
 
+    /// Force-generate a new token, ignoring the cache.
+    /// Used by the background refresh task to ensure the token file
+    /// always has a fresh token, not the cached one that might expire soon.
+    pub async fn force_refresh(&self) -> Result<String, SymphonyError> {
+        self.generate_installation_token().await
+    }
+
     /// Check if the cached token is still valid (with buffer).
     fn get_cached_token(&self) -> Option<String> {
         let guard = self.cached.read().ok()?;
