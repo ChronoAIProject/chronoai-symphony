@@ -105,6 +105,7 @@ mod tests {
             last_reported_total_tokens: 0,
             retry_attempt: None,
             stage_role: None,
+                dispatched_state: "Todo".to_string(),
             started_at: Utc::now(),
             turn_count: 0,
         }

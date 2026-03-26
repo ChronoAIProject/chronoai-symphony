@@ -303,8 +303,10 @@ impl Orchestrator {
                 let has_worker_for_different_state = self.state.running.values().any(|entry| {
                     let raw_id = entry.issue.id.as_str();
                     raw_id == issue.id && {
-                        let entry_state = entry.issue.state.to_lowercase().replace('-', " ");
-                        entry_state != issue_state_norm
+                        // Compare against dispatched_state (immutable) not
+                        // issue.state (updated by reconciliation).
+                        let dispatched = entry.dispatched_state.to_lowercase().replace('-', " ");
+                        dispatched != issue_state_norm
                     }
                 });
                 if has_worker_for_different_state {
@@ -484,6 +486,7 @@ impl Orchestrator {
                 last_reported_total_tokens: 0,
                 retry_attempt: attempt,
                 stage_role: None,
+                dispatched_state: issue.state.clone(),
                 started_at: Utc::now(),
                 turn_count: 0,
             },
@@ -587,6 +590,7 @@ impl Orchestrator {
                 last_reported_total_tokens: 0,
                 retry_attempt: attempt,
                 stage_role: Some(role.clone()),
+                dispatched_state: issue.state.clone(),
                 started_at: Utc::now(),
                 turn_count: 0,
             },

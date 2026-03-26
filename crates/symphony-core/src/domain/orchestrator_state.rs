@@ -35,6 +35,10 @@ pub struct RunningEntry {
     /// Used to track which stage of a parallel dispatch is handled by this entry.
     pub stage_role: Option<String>,
 
+    /// The issue state when this worker was dispatched.
+    /// Used to detect when the issue state changed while the worker is still running.
+    pub dispatched_state: String,
+
     pub started_at: DateTime<Utc>,
     pub turn_count: u32,
 }

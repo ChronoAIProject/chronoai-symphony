@@ -251,9 +251,8 @@ When working in parallel, each agent has its own workpad comment (e.g., `## Symp
 3. Implement the changes. Update the workpad as tasks complete.
 4. Run tests relevant to your changes. Fix only test failures caused by your changes.
 5. Commit and push to the branch.
-6. Create a PR if one doesn't exist:
+6. **MANDATORY: Create a PR before finishing.** This must be done before stopping:
    ```bash
-   # Check for existing PR first
    PR=$(gh pr list --head "symphony/issue-{{ issue.identifier | remove: '#' }}" --json number --jq '.[0].number')
    if [ -z "$PR" ]; then
      gh pr create --title "{{ issue.identifier }}: {{ issue.title }}" --body "Closes {{ issue.identifier }}"
