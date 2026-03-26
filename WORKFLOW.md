@@ -69,7 +69,7 @@ agents:
     # reasoning_effort: xhigh
     network_access: true
     turn_timeout_ms: 3600000
-    read_timeout_ms: 5000
+    read_timeout_ms: 30000
     stall_timeout_ms: 600000
   # claude:                              # Uncomment to enable. Add `agent:claude` label to issues.
   #   agent_type: claude-cli             # Uses official Claude Code CLI directly.

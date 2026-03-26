@@ -252,7 +252,7 @@ agents:
     reasoning_effort: xhigh            # Passed as --config flag + env var.
     network_access: true               # Sandbox network access. Default: true.
     turn_timeout_ms: 3600000           # Turn timeout. Default: 1 hour.
-    read_timeout_ms: 5000              # Handshake timeout. Default: 5s.
+    read_timeout_ms: 30000              # Handshake timeout. Default: 5s.
     stall_timeout_ms: 300000           # Inactivity timeout. Default: 5 min.
   claude:
     agent_type: claude-cli             # Native Claude Code CLI integration.

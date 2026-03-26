@@ -496,7 +496,7 @@ fn default_agent_profile() -> AgentProfileConfig {
         thread_sandbox: None,
         turn_sandbox_policy: None,
         turn_timeout_ms: 3_600_000,
-        read_timeout_ms: 5_000,
+        read_timeout_ms: 30_000,
         stall_timeout_ms: 300_000,
         model: None,
         reasoning_effort: None,
@@ -525,7 +525,7 @@ fn parse_profile_from_mapping(mapping: &Mapping) -> AgentProfileConfig {
         turn_timeout_ms: get_u64(mapping, "turn_timeout_ms")
             .unwrap_or(3_600_000),
         read_timeout_ms: get_u64(mapping, "read_timeout_ms")
-            .unwrap_or(5_000),
+            .unwrap_or(30_000),
         stall_timeout_ms: get_i64(mapping, "stall_timeout_ms")
             .unwrap_or(300_000),
         model: get_str(mapping, "model"),
