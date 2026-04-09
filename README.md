@@ -9,10 +9,13 @@ Symphony turns GitHub Issues into autonomous coding sessions. It polls your repo
 - **Multi-agent pipelines** - Different agents for different workflow phases (e.g., Codex implements, Claude reviews)
 - **Native Claude Code CLI** - Direct integration with `claude -p`, no third-party wrappers
 - **Custom pipeline stages** - Define any workflow state with its own agent, role, and prompt
+- **Shared + targeted prompt overlays** - Keep one common prompt body and append per-state or per-role instructions where needed
 - **Per-stage prompts** - Each pipeline stage can have its own prompt template
+- **Local coordination surface** - Shared notes, per-role mailboxes, and scope claims for parallel-agent handoffs without issue comment spam
 - **Live dashboard** - Real-time activity feed, token usage, rate limits, approval queue
 - **GitHub App auth** - Bot identity for commits/PRs with auto-refreshing tokens
 - **PR review cycle** - Automated code review → human review → rework loop
+- **Workflow hardening** - Stage-aware retries, responsive cancellation, and config validation on reload
 
 **Core capabilities:**
 
@@ -22,21 +25,42 @@ Symphony turns GitHub Issues into autonomous coding sessions. It polls your repo
 - Manages retries with exponential backoff and stall detection
 - Streams agent activity to a web dashboard with approve/deny controls
 - Tracks token usage and rate limits across both Codex and Claude
-- Hot-reloads WORKFLOW.md changes without restart
+- Hot-reloads valid `WORKFLOW.md` changes without restart
 
 ## Agent-Assisted Setup
 
-The fastest way to set up Symphony for your project is to ask your coding agent to do it. Paste this prompt into Claude Code, Codex, or any coding agent:
+The fastest way to adopt Symphony is to ask your preferred coding agent to generate a project-specific `WORKFLOW.md` from this README. Use a prompt like this:
 
+```text
+Read https://github.com/ChronoAIProject/chronoai-symphony/blob/main/README.md
+and create a production-ready WORKFLOW.md for my repository.
+
+Repository: <owner>/<repo>
+Tech stack: <your stack>
+Default branch: <main or trunk>
+Package/test commands: <if known>
+
+Requirements:
+- Reuse one shared branch and one shared PR per issue.
+- Use one persistent workpad comment per agent role.
+- Keep one common prompt body and use `prompt.state_instructions` plus `prompt.role_instructions` for small per-state or per-role deltas.
+- Default to full agent permissions and tool access when Symphony runs inside a dedicated trusted environment; only add stricter allowlists or sandboxing if the repo explicitly needs them.
+- Include explicit stop conditions so agents do not loop or keep polishing forever.
+- Include blocker handoff rules so agents stop cleanly when stuck.
+- Keep pipeline roles unique per state.
+- If the workflow can run parallel stages, define scopes and tell agents to use Symphony mailbox, note, and claim helpers instead of extra GitHub comments.
+- Prefer targeted verification commands for this repo.
+- Add repo-specific hooks for clone, checkout, install, and test setup.
+- If both Codex and Claude are available, use a sensible implementer/reviewer split.
 ```
-Set up Symphony for my repository based on
-https://github.com/ChronoAIProject/chronoai-symphony/blob/main/README.md
 
-My repository: <owner>/<repo>
-Tech stack: <your stack, e.g., "Rust + React", "Python + FastAPI", "Node.js + Next.js">
-```
+The result should be a tailored `WORKFLOW.md`, not a generic demo prompt.
 
-The agent will read this README and create a tailored `WORKFLOW.md` with the right hooks, prompt template, and architecture rules for your project.
+If you want the agent to start from a close-fit template instead of from scratch, point it at one of these starters first:
+
+- `workflow-templates/WORKFLOW.webapp.md`
+- `workflow-templates/WORKFLOW.backend.md`
+- `workflow-templates/WORKFLOW.monorepo.md`
 
 ## Quick Start
 
@@ -66,7 +90,8 @@ Then update these fields:
 - `tracker.project_slug` - your `owner/repo`
 - `hooks.after_create` - your git clone URL and build steps
 - `hooks.before_run` - your dependency install commands
-- The prompt body - your project's tech stack, architecture rules, and instructions
+- The prompt body - your shared contract across all states
+- `prompt.state_instructions` / `prompt.role_instructions` - small per-state or per-role deltas such as review-only, implement-only, or rework-only rules
 
 See the [full config reference](#full-workflowmd-reference) below for all available settings.
 
@@ -158,6 +183,27 @@ Place a `WORKFLOW.md` file in your project root. It has two parts:
 **YAML front matter** (between `---` delimiters) configures the runtime.
 **Markdown body** is the prompt template sent to the coding agent for each issue.
 
+#### Starter templates
+
+For most repos, start from the closest template instead of the generic root file:
+
+```bash
+# Web application
+cp workflow-templates/WORKFLOW.webapp.md /path/to/your/project/WORKFLOW.md
+
+# Backend service
+cp workflow-templates/WORKFLOW.backend.md /path/to/your/project/WORKFLOW.md
+
+# Monorepo
+cp workflow-templates/WORKFLOW.monorepo.md /path/to/your/project/WORKFLOW.md
+```
+
+Template intent:
+
+- `WORKFLOW.webapp.md`: frontend or full-stack product repos where UI quality and targeted route/component verification matter.
+- `WORKFLOW.backend.md`: APIs, services, workers, or data-heavy repos where migrations, contracts, and operational safety matter.
+- `WORKFLOW.monorepo.md`: multi-package repos where agents need strict workspace scoping and targeted verification to avoid roaming.
+
 #### Minimal WORKFLOW.md
 
 ```markdown
@@ -233,7 +279,7 @@ hooks:
 agent:
   default: codex                       # Which agent profile to use by default.
   max_concurrent_agents: 10            # Global concurrency limit. Default: 10.
-  max_turns: 20                         # Max turns per agent session. Default: 20.
+  max_turns: 20                        # Max turns per agent session. Must be > 0.
   max_retry_backoff_ms: 300000         # Max retry delay. Default: 5 minutes.
   auto_merge: false                    # Auto-merge after approval. Default: false.
   require_label: symphony              # Only dispatch issues with this label.
@@ -247,7 +293,8 @@ agents:
   codex:
     command: codex app-server          # Launch command.
     approval_policy: never             # never, on-request, granular, etc.
-    thread_sandbox: workspace-write
+    thread_sandbox: danger-full-access # Trusted isolated runner default.
+    turn_sandbox_policy: danger-full-access
     model: gpt-5.3-codex              # Passed as --model flag + env var.
     reasoning_effort: xhigh            # Passed as --config flag + env var.
     network_access: true               # Sandbox network access. Default: true.
@@ -259,9 +306,9 @@ agents:
     command: claude                    # Official CLI, no wrapper needed.
     model: claude-sonnet-4-6           # Passed as --model flag.
     reasoning_effort: high             # Passed as --effort flag. low/medium/high/max.
-    approval_policy: never             # "never" → --dangerously-skip-permissions.
-                                        # Omit or set other value to let Claude prompt.
+    approval_policy: never             # Trusted isolated runner default.
     max_turns: 20                      # Passed as --max-turns flag.
+    # allowed_tools / disallowed_tools are optional. Leave them unset for full access.
     network_access: true
     turn_timeout_ms: 7200000           # 2 hours for full Claude session.
 
@@ -270,16 +317,26 @@ agents:
 #   stages:
 #     - state: in-progress               # Stage per state.
 #       agent: codex                     # Agent profile name, or "none".
-#       role: implementer               # {{ stage.role }} in prompts.
-#       transition_to: code-review      # {{ stage.transition_to }}.
+#       role: implementer               # {{ stage.role }} in prompts. Unique per state.
+#       transition_to: code-review      # {{ stage.transition_to }}. Must point to a known state.
 #     - state: code-review
 #       agent: claude
 #       role: reviewer
 #       prompt: "Custom prompt..."       # Replaces WORKFLOW.md body.
 #       transition_to: human-review
-#       reject_to: rework               # {{ stage.reject_to }}.
+#       reject_to: rework               # {{ stage.reject_to }}. Requires transition_to.
 #     - state: human-review
-#       agent: none                      # No agent dispatched.
+#       agent: none                      # No agent dispatched. Handoff state only.
+
+prompt:
+  state_instructions:                   # Optional. Appended after the shared body for matching states.
+    code-review: |
+      Review only. Do not implement feature work in this state.
+    rework: |
+      Read open review feedback first and fix only the accepted review items.
+  role_instructions:                    # Optional. Appended after shared + state instructions for matching roles.
+    reviewer: |
+      Review diffs, verification, and risk only. Do not author fixes.
 
 server:
   port: 8080                            # Enable HTTP dashboard on this port.
@@ -333,6 +390,72 @@ This is a bug fix. Write a regression test first.
 Blocked by {{ blocker.identifier }} ({{ blocker.state }}).
 {% endfor %}
 ```
+
+### Workflow guardrails
+
+The default `WORKFLOW.md` in this repo is opinionated on purpose. It is designed to reduce the most common failure modes in long-running agent systems:
+
+- One branch per issue, shared across all agents for that issue.
+- One PR per issue, reused by implementers and rework agents.
+- One persistent workpad comment per agent role, instead of comment spam.
+- One local `.symphony/coordination/` scratchpad per workspace for cross-agent handoffs and durable notes.
+- Explicit stop conditions so agents hand off after success, blocker discovery, or "no change needed".
+- Explicit blocker rules so agents do not retry the same dead end forever.
+- Per-state prompt overlays so review, rework, and triage rules can differ without copying the full shared prompt.
+- Validation rejects unsafe workflow edits such as duplicate stage roles, unknown stage agents, self-looping transitions, and invalid `agent: none` transitions.
+
+When `WORKFLOW.md` changes at runtime, Symphony validates the new config before applying it. Invalid reloads are rejected and the last good config stays in effect.
+
+### Trusted runner default
+
+The example workflows in this repo assume Symphony runs inside a dedicated trusted environment such as an isolated VM, devcontainer, or CI worker. That is why the default examples are permissive:
+
+- Codex uses `approval_policy: never`, `thread_sandbox: danger-full-access`, and `turn_sandbox_policy: danger-full-access`.
+- Claude uses `approval_policy: never` and leaves `allowed_tools` / `disallowed_tools` unset so the CLI can use its full tool surface.
+
+If your environment is less trusted, tighten those fields deliberately rather than copying the permissive defaults unchanged.
+
+### Parallel agent coordination
+
+When multiple agents work on the same issue, Symphony prepares local coordination files inside the workspace and ignores them via `.git/info/exclude`:
+
+- `.symphony/coordination/shared.md` for durable facts, file ownership, and decisions
+- `.symphony/coordination/handoffs.md` for targeted baton-passes such as `To reviewer: ...`
+- `.symphony/coordination/roles/<role>.md` for one role's local notes
+
+This is intentionally closer to `chrono-code`'s scratchpad and mailbox model than to free-form issue-comment chatter. Use the GitHub workpad for the externally visible status record and use the local coordination files for short operational notes between agents.
+
+You do not install these helpers manually. Symphony creates them automatically inside each worker workspace under `.symphony_bin/`, prepends that directory to the agent subprocess `PATH`, and starts an internal localhost coordination API for note, mailbox, and claim operations.
+
+For append-style writes to shared coordination files, prefer the workspace helper:
+
+```bash
+symphony-note .symphony/coordination/shared.md "Owned paths: backend/auth and db/migrations"
+symphony-note .symphony/coordination/handoffs.md "To reviewer: focus on token refresh and migration ordering"
+```
+
+`symphony-note` uses the internal Symphony coordination API when it is available, and otherwise falls back to a workspace lock so two agents do not trample each other while leaving baton-passes.
+
+For structured live coordination, Symphony also provisions mailbox and claim helpers in `.symphony_bin`:
+
+```bash
+symphony-mailbox read
+symphony-mailbox send reviewer "Focus on token refresh and migration ordering"
+symphony-claim list
+symphony-claim claim backend/auth "editing token refresh flow"
+```
+
+`symphony-note`, `symphony-mailbox`, and `symphony-claim` use the internal Symphony coordination API when it is available, with the old local-file behavior kept only as a fallback path. That makes shared-note appends, active mailbox traffic, and scope claims part of the orchestrator-owned coordination surface instead of just hidden workspace edits.
+
+When the API-backed helper path can resolve the workspace, the helpers also mirror structured coordination audit records into `.symphony/coordination/events.tsv`; otherwise Symphony falls back to direct runtime events. In both cases, mailbox sends, claim acquisitions, and shared-note writes are visible in the activity feed.
+
+Codex sessions also advertise native dynamic coordination tools, `symphony_note`, `symphony_mailbox`, and `symphony_claim`, when Symphony has the internal coordination API and issue context available. Those tools call the same backend as the helper commands, so Codex can coordinate without falling back to shell commands first.
+
+Claude and Codex can coordinate with each other today because both paths hit the same orchestrator-owned backend. A mailbox message sent from Claude through `symphony-mailbox` is visible to Codex through `symphony_mailbox`, and the reverse is true as well.
+
+Why only Codex gets native tools right now: the current Codex integration is a long-lived JSON-RPC app-server session with first-class dynamic tool advertisement, while the current Claude integration is a headless `claude -p` subprocess with CLI tool filters. The orchestration backend is shared across both agents, but only Codex currently has an in-band native tool transport wired up. A future Claude-native path would likely use MCP against the same backend rather than a different coordination store.
+
+Reviewers should treat workflow and coordination misuse as a review concern. If `.symphony/coordination/events.tsv` or the local coordination files show duplicate workpads, duplicate PR attempts, direct edits to another role's notes, committed runtime scratch files, or scope collisions, reject the PR to `rework` and call out the workflow violation explicitly.
 
 ### Step 4: Blocker detection
 
@@ -522,7 +645,7 @@ Options:
 
 1. **Poll**: Every `polling.interval_ms`, Symphony fetches open GitHub issues matching `active_states` labels.
 2. **Dispatch**: Eligible issues are sorted by priority and age, then dispatched up to `max_concurrent_agents`.
-3. **Workspace**: Each issue gets an isolated directory under `workspace.root` with its own git clone, enabling parallel agents on different issues.
+3. **Workspace**: Each issue gets a directory under `workspace.root` with its own git clone plus local coordination files under `.symphony/coordination/`.
 4. **Branching**: The `before_run` hook creates a feature branch (`symphony/issue-N`) from `main` for each issue, so agents never conflict on the same branch.
 5. **Agent**: A Codex app-server subprocess is launched in the workspace. Symphony sends the rendered prompt (including the full issue description) and streams turn events in real-time.
 6. **Turns**: The agent can run up to `max_turns` consecutive turns per session. Between turns, Symphony checks if the issue is still active.
@@ -538,7 +661,7 @@ Symphony supports two integration modes:
 | Agent | Type | Command | Install | Notes |
 |-------|------|---------|---------|-------|
 | [OpenAI Codex](https://github.com/openai/codex) | `codex` (default) | `codex app-server` | `npm i -g @openai/codex` | JSON-RPC protocol over stdio. Multi-turn sessions managed by Symphony. |
-| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `claude-cli` | `claude` | [Install guide](https://docs.anthropic.com/en/docs/claude-code/getting-started) | Native CLI integration. Uses `claude -p` with `--output-format stream-json`. Single invocation, Claude manages its own turns. |
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `claude-cli` | `claude` | [Install guide](https://docs.anthropic.com/en/docs/claude-code/getting-started) | Native CLI integration. Uses `claude -p` with `--output-format stream-json`, `--verbose`, and hook event streaming. Single invocation, Claude manages its own turns. |
 
 ### Multi-agent setup
 
@@ -548,6 +671,9 @@ Define multiple agents in `WORKFLOW.md` and assign them per-issue via GitHub lab
 agents:
   codex:
     command: codex app-server
+    approval_policy: never
+    thread_sandbox: danger-full-access
+    turn_sandbox_policy: danger-full-access
     model: gpt-5.3-codex
     reasoning_effort: xhigh           # Codex: -c model_reasoning_effort=xhigh
   claude:
@@ -555,6 +681,7 @@ agents:
     command: claude
     model: claude-sonnet-4-6
     reasoning_effort: high             # Claude: --effort high (low/medium/high/max)
+    approval_policy: never
     max_turns: 20
 
 agent:
@@ -578,10 +705,14 @@ Use different agents for different workflow phases. Codex implements, Claude rev
 agents:
   codex:
     command: codex app-server
+    approval_policy: never
+    thread_sandbox: danger-full-access
+    turn_sandbox_policy: danger-full-access
     model: gpt-5.3-codex
   claude:
     agent_type: claude-cli
     command: claude
+    approval_policy: never
     model: claude-sonnet-4-6
 
 agent:
@@ -642,12 +773,33 @@ pipeline:
       agent: none                         # No agent - handoff to human
 ```
 
+Guardrails for custom pipelines:
+
+- Keep `role` unique within a state. Symphony uses `issue-id:role` internally to prevent duplicate dispatch.
+- Do not use `:` inside a role name.
+- `reject_to` should only be used on stages that also declare `transition_to`.
+- `transition_to` and `reject_to` should point to known active, terminal, or pipeline states.
+- `agent: none` means handoff only. It should not declare automated transitions.
+- If multiple runnable stages share the same state, each one must define a unique non-root `scope`.
+- If multiple runnable stages share the same state, they must use the same `transition_to` and the same `reject_to` target so the next state is not ambiguous.
+
 **Prompt behavior:**
 
 | Stage config | What happens |
 |---|---|
+| `prompt.state_instructions.<state>` | Appends extra instructions after the shared `WORKFLOW.md` body for that state. Use this for small state deltas. |
+| `prompt.role_instructions.<role>` | Appends extra instructions after the shared body and state instructions for that role. Use this for review-only vs implement-only deltas. |
 | No `prompt` field | Uses the WORKFLOW.md body with `{{ stage.role }}`, `{{ stage.transition_to }}`, `{{ stage.reject_to }}` injected |
 | Has `prompt` field | Stage prompt **replaces** the WORKFLOW.md body. Use `{{ default_prompt }}` to include the original body |
+
+Use the prompt layers this way:
+
+- `WORKFLOW.md` body: rules that every agent and every backend should follow.
+- `prompt.state_instructions`: small state-specific deltas such as "review only" or "fix only review feedback".
+- `prompt.role_instructions`: small role-specific deltas such as "review only", "implement only", or "do not author fixes".
+- `pipeline.stages[].prompt`: full replacement for unusual stages such as architecture, security review, or repo-specific release handling.
+
+`prompt.state_instructions` applies to both legacy `agent.by_state` workflows and custom `pipeline` workflows because it keys off the current issue state, not the selected backend. `prompt.role_instructions` applies when a pipeline stage role is active.
 
 **Template variables available in all prompts:**
 
@@ -729,6 +881,7 @@ graph TB
 - `when_labels` are user-defined GitHub labels. Any label name works.
 - Stages **with** `when_labels` take priority over fallbacks (those without).
 - `scope` is appended to the prompt: "Focus your changes on the `backend/` directory."
+- Parallel workers also get local coordination files under `.symphony/coordination/` so they can exchange durable notes without rewriting each other's workpads.
 - Each parallel worker gets its own session, activity feed, and token tracking in the dashboard.
 
 **Key differences between agent types:**
@@ -739,7 +892,9 @@ graph TB
 | Handshake | initialize -> thread/start -> turn/start | None (single CLI invocation) |
 | Turn management | Symphony manages multi-turn loop | Claude CLI manages internally via `--max-turns` |
 | Approval policy | Sent in JSON-RPC handshake params | `never` → `--dangerously-skip-permissions` |
-| Prompt delivery | JSON-RPC `turn/start` message | `$SYMPHONY_PROMPT` env var |
+| Coordination surface | Native Symphony dynamic tools when available | Same Symphony backend via workspace helpers today |
+| Tool filters | Access is managed by Codex sandbox/approval policy | `allowed_tools` / `disallowed_tools` map to Claude CLI flags when you choose to restrict it |
+| Prompt delivery | JSON-RPC `turn/start` message | `SYMPHONY_PROMPT_FILE` read by `claude -p` |
 | Model flag | `-c model=<value>` | `--model <value>` |
 | Reasoning effort | `-c model_reasoning_effort=<value>` | `--effort <value>` (low/medium/high/max) |
 

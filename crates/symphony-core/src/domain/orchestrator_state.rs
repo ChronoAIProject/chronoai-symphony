@@ -13,12 +13,14 @@ pub struct RunningEntry {
     pub identifier: String,
     pub issue: Issue,
     pub agent_type: String,
+    pub stall_timeout_ms: i64,
 
     pub session_id: Option<String>,
     pub codex_app_server_pid: Option<String>,
     pub last_codex_message: Option<String>,
     pub last_codex_event: Option<String>,
     pub last_codex_timestamp: Option<DateTime<Utc>>,
+    pub stop_requested_at: Option<DateTime<Utc>>,
 
     pub codex_input_tokens: u64,
     pub codex_output_tokens: u64,

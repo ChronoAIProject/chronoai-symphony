@@ -118,34 +118,64 @@ mod tests {
 
     #[test]
     fn input_required_direct_method() {
-        assert!(is_user_input_request("item/tool/requestUserInput", &json!({})));
+        assert!(is_user_input_request(
+            "item/tool/requestUserInput",
+            &json!({})
+        ));
         assert!(is_user_input_request("turn/input_required", &json!({})));
         assert!(is_user_input_request("turn/needs_input", &json!({})));
     }
 
     #[test]
     fn input_required_via_flag() {
-        assert!(is_user_input_request("turn/something", &json!({"requiresInput": true})));
-        assert!(is_user_input_request("turn/something", &json!({"needsInput": true})));
-        assert!(is_user_input_request("turn/something", &json!({"inputRequired": true})));
-        assert!(is_user_input_request("turn/x", &json!({"type": "input_required"})));
+        assert!(is_user_input_request(
+            "turn/something",
+            &json!({"requiresInput": true})
+        ));
+        assert!(is_user_input_request(
+            "turn/something",
+            &json!({"needsInput": true})
+        ));
+        assert!(is_user_input_request(
+            "turn/something",
+            &json!({"inputRequired": true})
+        ));
+        assert!(is_user_input_request(
+            "turn/x",
+            &json!({"type": "input_required"})
+        ));
     }
 
     #[test]
     fn input_not_required() {
         assert!(!is_user_input_request("turn/completed", &json!({})));
-        assert!(!is_user_input_request("notification", &json!({"requiresInput": true})));
+        assert!(!is_user_input_request(
+            "notification",
+            &json!({"requiresInput": true})
+        ));
     }
 
     #[test]
     fn decision_for_item_methods() {
-        assert_eq!(approval_decision("item/commandExecution/requestApproval"), "acceptForSession");
-        assert_eq!(approval_decision("item/fileChange/requestApproval"), "acceptForSession");
+        assert_eq!(
+            approval_decision("item/commandExecution/requestApproval"),
+            "acceptForSession"
+        );
+        assert_eq!(
+            approval_decision("item/fileChange/requestApproval"),
+            "acceptForSession"
+        );
     }
 
     #[test]
     fn decision_for_legacy_methods() {
-        assert_eq!(approval_decision("execCommandApproval"), "approved_for_session");
-        assert_eq!(approval_decision("applyPatchApproval"), "approved_for_session");
+        assert_eq!(
+            approval_decision("execCommandApproval"),
+            "approved_for_session"
+        );
+        assert_eq!(
+            approval_decision("applyPatchApproval"),
+            "approved_for_session"
+        );
     }
 }

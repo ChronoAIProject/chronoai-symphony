@@ -25,10 +25,7 @@ pub async fn startup_terminal_cleanup(
         "starting terminal workspace cleanup"
     );
 
-    let issues = match tracker
-        .fetch_issues_by_states(terminal_states)
-        .await
-    {
+    let issues = match tracker.fetch_issues_by_states(terminal_states).await {
         Ok(issues) => issues,
         Err(e) => {
             warn!(
@@ -126,14 +123,7 @@ mod tests {
     #[tokio::test]
     async fn cleans_terminal_workspaces() {
         let tmp = TempDir::new().unwrap();
-        let mgr = WorkspaceManager::new(
-            tmp.path().to_path_buf(),
-            None,
-            None,
-            None,
-            None,
-            5000,
-        );
+        let mgr = WorkspaceManager::new(tmp.path().to_path_buf(), None, None, None, None, 5000);
 
         // Create workspaces.
         mgr.create_for_issue("issue-1").await.unwrap();
@@ -187,21 +177,9 @@ mod tests {
         }
 
         let tmp = TempDir::new().unwrap();
-        let mgr = WorkspaceManager::new(
-            tmp.path().to_path_buf(),
-            None,
-            None,
-            None,
-            None,
-            5000,
-        );
+        let mgr = WorkspaceManager::new(tmp.path().to_path_buf(), None, None, None, None, 5000);
 
         // Should not panic.
-        startup_terminal_cleanup(
-            &FailingTracker,
-            &mgr,
-            &["Done".to_string()],
-        )
-        .await;
+        startup_terminal_cleanup(&FailingTracker, &mgr, &["Done".to_string()]).await;
     }
 }

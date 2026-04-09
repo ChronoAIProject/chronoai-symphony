@@ -29,6 +29,7 @@ serde_yaml_ng = "0.10"
 # HTTP
 reqwest = { version = "0.13", features = ["json"] }
 axum = "0.8"
+urlencoding = "2"
 
 # Template engine
 liquid = "0.26"

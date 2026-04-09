@@ -37,6 +37,7 @@ pub async fn perform_handshake(
     approval_policy: Option<&Value>,
     sandbox: Option<&Value>,
     sandbox_policy: Option<&Value>,
+    dynamic_tools: &[Value],
     read_timeout: Duration,
 ) -> Result<SessionInfo, SymphonyError> {
     info!("starting agent handshake");
@@ -65,7 +66,7 @@ pub async fn perform_handshake(
     debug!("sent initialized notification");
 
     // Step 3: Send thread/start request.
-    let thread_req = build_thread_start(2, ap, sb, cwd);
+    let thread_req = build_thread_start(2, ap, sb, cwd, dynamic_tools);
     send_json(process, &thread_req).await?;
     debug!("sent thread/start request");
 

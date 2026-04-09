@@ -130,6 +130,14 @@ fn find_closing_delimiter(s: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::validate_dispatch_config;
+    use std::sync::{Mutex, OnceLock};
+    use symphony_core::domain::ServiceConfig;
+
+    fn template_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn parse_with_front_matter_and_body() {
@@ -254,5 +262,46 @@ Fix issue {{ issue.identifier }}: {{ issue.title }}
             Some("github")
         );
         assert!(wf.prompt_template.starts_with("Fix issue"));
+    }
+
+    fn assert_template_is_valid(path: &str, contents: &str) {
+        let _guard = template_env_lock().lock().unwrap();
+        unsafe { std::env::set_var("GITHUB_TOKEN", "ghp_template_test") };
+
+        let workflow = parse_workflow_str(contents).unwrap_or_else(|err| {
+            panic!("failed to parse template {path}: {err}");
+        });
+        let config = ServiceConfig::from_workflow(&workflow).unwrap_or_else(|err| {
+            panic!("failed to build config for template {path}: {err}");
+        });
+        validate_dispatch_config(&config).unwrap_or_else(|err| {
+            panic!("failed to validate template {path}: {err}");
+        });
+
+        unsafe { std::env::remove_var("GITHUB_TOKEN") };
+    }
+
+    #[test]
+    fn starter_webapp_template_parses_and_validates() {
+        assert_template_is_valid(
+            "workflow-templates/WORKFLOW.webapp.md",
+            include_str!("../../../workflow-templates/WORKFLOW.webapp.md"),
+        );
+    }
+
+    #[test]
+    fn starter_backend_template_parses_and_validates() {
+        assert_template_is_valid(
+            "workflow-templates/WORKFLOW.backend.md",
+            include_str!("../../../workflow-templates/WORKFLOW.backend.md"),
+        );
+    }
+
+    #[test]
+    fn starter_monorepo_template_parses_and_validates() {
+        assert_template_is_valid(
+            "workflow-templates/WORKFLOW.monorepo.md",
+            include_str!("../../../workflow-templates/WORKFLOW.monorepo.md"),
+        );
     }
 }

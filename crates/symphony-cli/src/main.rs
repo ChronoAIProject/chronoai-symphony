@@ -44,24 +44,21 @@ async fn main() -> Result<()> {
     tracing::info!("starting Symphony");
 
     // 2. Load and validate workflow.
-    let workflow = symphony_workflow::loader::load_workflow(&args.workflow_path)
-        .map_err(|e| {
-            tracing::error!(error = %e, "failed to load workflow");
-            anyhow::anyhow!("failed to load workflow: {e}")
-        })?;
+    let workflow = symphony_workflow::loader::load_workflow(&args.workflow_path).map_err(|e| {
+        tracing::error!(error = %e, "failed to load workflow");
+        anyhow::anyhow!("failed to load workflow: {e}")
+    })?;
 
-    let config = symphony_core::domain::ServiceConfig::from_workflow(&workflow)
-        .map_err(|e| {
-            tracing::error!(error = %e, "failed to build config from workflow");
-            anyhow::anyhow!("failed to build config: {e}")
-        })?;
+    let config = symphony_core::domain::ServiceConfig::from_workflow(&workflow).map_err(|e| {
+        tracing::error!(error = %e, "failed to build config from workflow");
+        anyhow::anyhow!("failed to build config: {e}")
+    })?;
 
     // 3. Validate dispatch config.
-    symphony_workflow::validation::validate_dispatch_config(&config)
-        .map_err(|e| {
-            tracing::error!(error = %e, "dispatch config validation failed");
-            anyhow::anyhow!("dispatch config validation failed: {e}")
-        })?;
+    symphony_workflow::validation::validate_dispatch_config(&config).map_err(|e| {
+        tracing::error!(error = %e, "dispatch config validation failed");
+        anyhow::anyhow!("dispatch config validation failed: {e}")
+    })?;
 
     // 4. Initialize components.
     let endpoint = if config.tracker_endpoint.is_empty() {
@@ -71,33 +68,33 @@ async fn main() -> Result<()> {
     };
 
     // Determine auth: GitHub App or PAT.
-    let app_token_provider: Option<Arc<symphony_tracker::github::app_token::GitHubAppTokenProvider>> =
-        if let (Some(app_id), Some(installation_id), Some(key_path)) = (
-            config.github_app_id,
-            config.github_app_installation_id,
-            config.github_app_private_key_path.as_deref(),
-        ) {
-            let private_key = std::fs::read_to_string(key_path).map_err(|e| {
-                anyhow::anyhow!("failed to read GitHub App private key from {key_path}: {e}")
-            })?;
-            let app_config = symphony_tracker::github::app_token::GitHubAppConfig {
-                app_id,
-                installation_id,
-                private_key_pem: private_key,
-                api_endpoint: if config.tracker_endpoint.is_empty() {
-                    "https://api.github.com".to_string()
-                } else {
-                    config.tracker_endpoint.clone()
-                },
-            };
-            let provider =
-                symphony_tracker::github::app_token::GitHubAppTokenProvider::new(app_config)
-                    .map_err(|e| anyhow::anyhow!("failed to create GitHub App token provider: {e}"))?;
-            tracing::info!("using GitHub App authentication (app_id={app_id})");
-            Some(Arc::new(provider))
-        } else {
-            None
+    let app_token_provider: Option<
+        Arc<symphony_tracker::github::app_token::GitHubAppTokenProvider>,
+    > = if let (Some(app_id), Some(installation_id), Some(key_path)) = (
+        config.github_app_id,
+        config.github_app_installation_id,
+        config.github_app_private_key_path.as_deref(),
+    ) {
+        let private_key = std::fs::read_to_string(key_path).map_err(|e| {
+            anyhow::anyhow!("failed to read GitHub App private key from {key_path}: {e}")
+        })?;
+        let app_config = symphony_tracker::github::app_token::GitHubAppConfig {
+            app_id,
+            installation_id,
+            private_key_pem: private_key,
+            api_endpoint: if config.tracker_endpoint.is_empty() {
+                "https://api.github.com".to_string()
+            } else {
+                config.tracker_endpoint.clone()
+            },
         };
+        let provider = symphony_tracker::github::app_token::GitHubAppTokenProvider::new(app_config)
+            .map_err(|e| anyhow::anyhow!("failed to create GitHub App token provider: {e}"))?;
+        tracing::info!("using GitHub App authentication (app_id={app_id})");
+        Some(Arc::new(provider))
+    } else {
+        None
+    };
 
     // Create the GitHub client with the appropriate auth method.
     let github_client = if let Some(ref provider) = app_token_provider {
@@ -129,8 +126,7 @@ async fn main() -> Result<()> {
         anyhow::anyhow!("failed to create GitHub client: {e}")
     })?;
 
-    let tracker: Arc<dyn symphony_tracker::traits::IssueTracker> =
-        Arc::new(github_client);
+    let tracker: Arc<dyn symphony_tracker::traits::IssueTracker> = Arc::new(github_client);
 
     // If using GitHub App, write token to a file and configure gh/git to
     // read from it. This ensures long-running agent sessions always use
@@ -138,15 +134,15 @@ async fn main() -> Result<()> {
     // in running child processes.
     let token_file_path = config.workspace_root.join(".symphony_token");
     if let Some(ref provider) = app_token_provider {
-        let token = provider.get_token().await.map_err(|e| {
-            anyhow::anyhow!("failed to get GitHub App token for agent: {e}")
-        })?;
+        let token = provider
+            .get_token()
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to get GitHub App token for agent: {e}"))?;
 
         // Write token to file and create a helper script that `gh` can use.
         std::fs::create_dir_all(&config.workspace_root).ok();
-        std::fs::write(&token_file_path, &token).map_err(|e| {
-            anyhow::anyhow!("failed to write token file: {e}")
-        })?;
+        std::fs::write(&token_file_path, &token)
+            .map_err(|e| anyhow::anyhow!("failed to write token file: {e}"))?;
 
         // Create a gh-token helper script that reads the latest token
         // from the file. This is used as GH_TOKEN via command substitution
@@ -156,11 +152,13 @@ async fn main() -> Result<()> {
         std::fs::write(
             &helper_script_path,
             format!("#!/bin/sh\ncat '{}'", token_file_path.display()),
-        ).ok();
+        )
+        .ok();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&helper_script_path, std::fs::Permissions::from_mode(0o755)).ok();
+            std::fs::set_permissions(&helper_script_path, std::fs::Permissions::from_mode(0o755))
+                .ok();
         }
 
         // Set env vars pointing to the token file and the current token.
@@ -210,16 +208,14 @@ async fn main() -> Result<()> {
         });
     }
 
-    let workspace_manager = Arc::new(
-        symphony_workspace::manager::WorkspaceManager::new(
-            config.workspace_root.clone(),
-            config.hooks.after_create.clone(),
-            config.hooks.before_run.clone(),
-            config.hooks.after_run.clone(),
-            config.hooks.before_remove.clone(),
-            config.hooks.timeout_ms,
-        ),
-    );
+    let workspace_manager = Arc::new(symphony_workspace::manager::WorkspaceManager::new(
+        config.workspace_root.clone(),
+        config.hooks.after_create.clone(),
+        config.hooks.before_run.clone(),
+        config.hooks.after_run.clone(),
+        config.hooks.before_remove.clone(),
+        config.hooks.timeout_ms,
+    ));
 
     // 5. Startup terminal cleanup.
     symphony_orchestrator::cleanup::startup_terminal_cleanup(
@@ -244,10 +240,7 @@ async fn main() -> Result<()> {
     let workflow_path = args.workflow_path.clone();
     tokio::spawn(async move {
         let (wtx, mut wrx) = tokio::sync::mpsc::channel(16);
-        match symphony_workflow::watcher::WorkflowWatcher::new(
-            workflow_path.clone(),
-            wtx,
-        ) {
+        match symphony_workflow::watcher::WorkflowWatcher::new(workflow_path.clone(), wtx) {
             Ok(mut watcher) => {
                 if let Err(e) = watcher.start().await {
                     tracing::error!(error = %e, "failed to start workflow watcher");
@@ -283,28 +276,53 @@ async fn main() -> Result<()> {
         }
     });
 
-    // 8. Optionally start HTTP server.
+    // 8. Start the internal localhost API server used by coordination helpers.
     let shared_snapshot = orchestrator.shared_snapshot();
+    let snapshot_handle = shared_snapshot.clone();
+    let snapshot_fn: Arc<dyn Fn() -> serde_json::Value + Send + Sync> = Arc::new(move || {
+        snapshot_handle
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|_| serde_json::json!({"error": "snapshot lock poisoned"}))
+    });
+
+    let app_state = Arc::new(symphony_server::router::AppState {
+        orchestrator_tx: orch_tx.clone(),
+        snapshot_fn,
+        approval_queue: orchestrator.approval_queue(),
+        coordination: Arc::new(symphony_server::coordination::CoordinationStore::new()),
+    });
+
+    let internal_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to bind internal coordination API: {e}"))?;
+    let internal_addr = internal_listener
+        .local_addr()
+        .map_err(|e| anyhow::anyhow!("failed to read internal coordination API address: {e}"))?;
+    let coordination_api_url = format!(
+        "http://127.0.0.1:{}/api/v1/coordination",
+        internal_addr.port()
+    );
+    unsafe {
+        std::env::set_var("SYMPHONY_COORDINATION_API_URL", &coordination_api_url);
+    }
+    let internal_router = symphony_server::router::create_router(Arc::clone(&app_state));
+    tokio::spawn(async move {
+        if let Err(e) =
+            symphony_server::router::start_server_on_listener(internal_router, internal_listener)
+                .await
+        {
+            tracing::error!(error = %e, "internal coordination API server error");
+        }
+    });
+    tracing::info!(coordination_api_url = %coordination_api_url, "internal coordination API started");
+
+    // 9. Optionally start an externally reachable HTTP server for the dashboard/API.
     let server_port = args.port.or(config.server_port);
     if let Some(port) = server_port {
-        let snapshot_handle = shared_snapshot.clone();
-        let snapshot_fn: Arc<dyn Fn() -> serde_json::Value + Send + Sync> =
-            Arc::new(move || {
-                snapshot_handle
-                    .read()
-                    .map(|guard| guard.clone())
-                    .unwrap_or_else(|_| serde_json::json!({"error": "snapshot lock poisoned"}))
-            });
-
-        let app_state = Arc::new(symphony_server::router::AppState {
-            orchestrator_tx: orch_tx.clone(),
-            snapshot_fn,
-            approval_queue: orchestrator.approval_queue(),
-        });
-
-        let router = symphony_server::router::create_router(app_state);
+        let external_router = symphony_server::router::create_router(app_state);
         tokio::spawn(async move {
-            if let Err(e) = symphony_server::router::start_server(router, port).await {
+            if let Err(e) = symphony_server::router::start_server(external_router, port).await {
                 tracing::error!(error = %e, "HTTP server error");
             }
         });
@@ -312,11 +330,10 @@ async fn main() -> Result<()> {
         tracing::info!(port, "HTTP server started");
     }
 
-    // 9. Run orchestrator (blocks until shutdown).
+    // 10. Run orchestrator (blocks until shutdown).
     tracing::info!("Symphony started, entering main loop");
     orchestrator.run().await;
 
     tracing::info!("Symphony shutdown complete");
     Ok(())
 }
-

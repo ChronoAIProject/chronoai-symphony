@@ -43,20 +43,20 @@ impl AgentProcess {
             command.to_string()
         };
 
-        // If SYMPHONY_TOKEN_FILE is set (GitHub App auth), create a
-        // wrapper bin directory with a `gh` script that re-reads the token
-        // from the file before each invocation. This directory is prepended
-        // to PATH so all subprocesses (including codex/claude agent) use
-        // the wrapper instead of the real `gh`, ensuring fresh tokens.
+        // Always prepend `.symphony_bin` so workspace-local helper scripts
+        // are available to all agents. If SYMPHONY_TOKEN_FILE is set
+        // (GitHub App auth), also install a `gh` wrapper there that re-reads
+        // the token on each invocation.
+        let wrapper_dir = cwd.join(".symphony_bin");
+        let _ = std::fs::create_dir_all(&wrapper_dir);
+
         let has_token_file = env_vars.iter().any(|(k, _)| *k == "SYMPHONY_TOKEN_FILE");
-        let wrapper_dir = if has_token_file {
-            let token_file = env_vars.iter()
+        if has_token_file {
+            let token_file = env_vars
+                .iter()
                 .find(|(k, _)| *k == "SYMPHONY_TOKEN_FILE")
                 .map(|(_, v)| *v)
                 .unwrap_or("");
-
-            let wrapper_dir = cwd.join(".symphony_bin");
-            let _ = std::fs::create_dir_all(&wrapper_dir);
 
             // Create a `gh` wrapper script.
             let gh_wrapper = wrapper_dir.join("gh");
@@ -77,13 +77,10 @@ impl AgentProcess {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&gh_wrapper, std::fs::Permissions::from_mode(0o755));
+                let _ =
+                    std::fs::set_permissions(&gh_wrapper, std::fs::Permissions::from_mode(0o755));
             }
-
-            Some(wrapper_dir)
-        } else {
-            None
-        };
+        }
 
         let mut cmd = Command::new("bash");
         cmd.arg("-lc")
@@ -108,20 +105,19 @@ impl AgentProcess {
             cmd.stderr(std::process::Stdio::piped());
         }
 
-        // Prepend wrapper bin dir to PATH if using token file.
-        if let Some(ref wrapper) = wrapper_dir {
-            let current_path = std::env::var("PATH").unwrap_or_default();
-            cmd.env("PATH", format!("{}:{}", wrapper.display(), current_path));
-        }
+        let current_path = std::env::var("PATH").unwrap_or_default();
+        cmd.env(
+            "PATH",
+            format!("{}:{}", wrapper_dir.display(), current_path),
+        );
 
         for (key, value) in env_vars {
             cmd.env(key, value);
         }
 
-        let mut child = cmd.spawn()
-            .map_err(|e| SymphonyError::CodexNotFound {
-                command: format!("{command}: {e}"),
-            })?;
+        let mut child = cmd.spawn().map_err(|e| SymphonyError::CodexNotFound {
+            command: format!("{command}: {e}"),
+        })?;
 
         let stdout = child
             .stdout
@@ -160,9 +156,12 @@ impl AgentProcess {
     /// Only works when stdin is piped (Codex mode). Returns an error if
     /// stdin is not available (Claude CLI mode).
     pub async fn write_message(&mut self, msg: &str) -> Result<(), SymphonyError> {
-        let stdin = self.stdin.as_mut().ok_or_else(|| SymphonyError::ResponseError {
-            detail: "stdin not available (agent launched without piped stdin)".to_string(),
-        })?;
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| SymphonyError::ResponseError {
+                detail: "stdin not available (agent launched without piped stdin)".to_string(),
+            })?;
 
         debug!(msg_len = msg.len(), "writing message to agent");
 
@@ -180,9 +179,12 @@ impl AgentProcess {
                 detail: format!("failed to write newline to agent stdin: {e}"),
             })?;
 
-        stdin.flush().await.map_err(|e| SymphonyError::ResponseError {
-            detail: format!("failed to flush agent stdin: {e}"),
-        })?;
+        stdin
+            .flush()
+            .await
+            .map_err(|e| SymphonyError::ResponseError {
+                detail: format!("failed to flush agent stdin: {e}"),
+            })?;
 
         Ok(())
     }
@@ -192,13 +194,13 @@ impl AgentProcess {
     /// Returns `None` if the stream has ended (process exited).
     pub async fn read_line(&mut self) -> Result<Option<String>, SymphonyError> {
         let mut line = String::new();
-        let bytes_read = self
-            .stdout
-            .read_line(&mut line)
-            .await
-            .map_err(|e| SymphonyError::ResponseError {
-                detail: format!("failed to read from agent stdout: {e}"),
-            })?;
+        let bytes_read =
+            self.stdout
+                .read_line(&mut line)
+                .await
+                .map_err(|e| SymphonyError::ResponseError {
+                    detail: format!("failed to read from agent stdout: {e}"),
+                })?;
 
         if bytes_read == 0 {
             info!("agent stdout closed (EOF)");
@@ -208,7 +210,11 @@ impl AgentProcess {
         // Trim the trailing newline.
         let trimmed = line.trim_end().to_string();
         if !trimmed.is_empty() {
-            debug!(bytes = bytes_read, line_len = trimmed.len(), "read line from agent");
+            debug!(
+                bytes = bytes_read,
+                line_len = trimmed.len(),
+                "read line from agent"
+            );
         }
 
         Ok(Some(trimmed))
@@ -217,9 +223,12 @@ impl AgentProcess {
     /// Read raw bytes from stdout (for debugging).
     /// Returns the number of bytes read, or 0 on EOF.
     pub async fn read_raw(&mut self, buf: &mut [u8]) -> Result<usize, SymphonyError> {
-        self.stdout.read(buf).await.map_err(|e| SymphonyError::ResponseError {
-            detail: format!("failed to read raw bytes: {e}"),
-        })
+        self.stdout
+            .read(buf)
+            .await
+            .map_err(|e| SymphonyError::ResponseError {
+                detail: format!("failed to read raw bytes: {e}"),
+            })
     }
 
     /// Kill the agent process.
@@ -240,9 +249,11 @@ impl AgentProcess {
 
     /// Check if the child process has exited without blocking.
     pub async fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>, SymphonyError> {
-        self.child.try_wait().map_err(|e| SymphonyError::ResponseError {
-            detail: format!("failed to check agent process status: {e}"),
-        })
+        self.child
+            .try_wait()
+            .map_err(|e| SymphonyError::ResponseError {
+                detail: format!("failed to check agent process status: {e}"),
+            })
     }
 }
 
@@ -269,7 +280,9 @@ mod tests {
     #[tokio::test]
     async fn launch_cat_write_and_read() {
         let dir = TempDir::new().unwrap();
-        let mut proc = AgentProcess::launch("cat", dir.path(), &[], true).await.unwrap();
+        let mut proc = AgentProcess::launch("cat", dir.path(), &[], true)
+            .await
+            .unwrap();
 
         proc.write_message(r#"{"hello":"world"}"#).await.unwrap();
         let line = proc.read_line().await.unwrap();
@@ -307,5 +320,26 @@ mod tests {
 
         let line = proc.read_line().await.unwrap();
         assert_eq!(line, Some("hello".to_string()));
+    }
+
+    #[tokio::test]
+    async fn launch_prepends_workspace_symphony_bin_to_path() {
+        let dir = TempDir::new().unwrap();
+        let helper_dir = dir.path().join(".symphony_bin");
+        std::fs::create_dir_all(&helper_dir).unwrap();
+        let helper = helper_dir.join("workspace-helper");
+        std::fs::write(&helper, "#!/bin/sh\necho helper-ok\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let mut proc = AgentProcess::launch("workspace-helper", dir.path(), &[], false)
+            .await
+            .unwrap();
+
+        let line = proc.read_line().await.unwrap();
+        assert_eq!(line, Some("helper-ok".to_string()));
     }
 }

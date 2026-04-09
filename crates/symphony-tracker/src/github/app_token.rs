@@ -12,7 +12,7 @@
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use reqwest::header::{self, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info};
@@ -64,16 +64,18 @@ impl GitHubAppTokenProvider {
     /// Create a new token provider from the app configuration.
     pub fn new(config: GitHubAppConfig) -> Result<Self, SymphonyError> {
         // Validate that the private key can be parsed.
-        EncodingKey::from_rsa_pem(config.private_key_pem.as_bytes())
-            .map_err(|e| SymphonyError::ConfigValidation {
+        EncodingKey::from_rsa_pem(config.private_key_pem.as_bytes()).map_err(|e| {
+            SymphonyError::ConfigValidation {
                 detail: format!("invalid GitHub App private key: {e}"),
-            })?;
+            }
+        })?;
 
-        let http = reqwest::Client::builder()
-            .build()
-            .map_err(|e| SymphonyError::TrackerApiRequest {
-                detail: format!("failed to build HTTP client: {e}"),
-            })?;
+        let http =
+            reqwest::Client::builder()
+                .build()
+                .map_err(|e| SymphonyError::TrackerApiRequest {
+                    detail: format!("failed to build HTTP client: {e}"),
+                })?;
 
         Ok(Self {
             config,
@@ -155,11 +157,11 @@ impl GitHubAppTokenProvider {
 
     /// Generate a JWT signed with the app's private key.
     fn generate_jwt(&self) -> Result<String, SymphonyError> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| SymphonyError::ConfigValidation {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| {
+            SymphonyError::ConfigValidation {
                 detail: format!("system time error: {e}"),
-            })?;
+            }
+        })?;
 
         // Issue the JWT 60 seconds in the past to account for clock drift.
         let iat = now.as_secs().saturating_sub(60);
@@ -171,15 +173,18 @@ impl GitHubAppTokenProvider {
             iss: self.config.app_id.to_string(),
         };
 
-        let key = EncodingKey::from_rsa_pem(self.config.private_key_pem.as_bytes())
-            .map_err(|e| SymphonyError::ConfigValidation {
-                detail: format!("failed to parse private key: {e}"),
+        let key =
+            EncodingKey::from_rsa_pem(self.config.private_key_pem.as_bytes()).map_err(|e| {
+                SymphonyError::ConfigValidation {
+                    detail: format!("failed to parse private key: {e}"),
+                }
             })?;
 
-        let token = encode(&Header::new(Algorithm::RS256), &claims, &key)
-            .map_err(|e| SymphonyError::ConfigValidation {
+        let token = encode(&Header::new(Algorithm::RS256), &claims, &key).map_err(|e| {
+            SymphonyError::ConfigValidation {
                 detail: format!("failed to encode JWT: {e}"),
-            })?;
+            }
+        })?;
 
         debug!("generated GitHub App JWT");
         Ok(token)
@@ -233,11 +238,12 @@ impl GitHubAppTokenProvider {
             });
         }
 
-        response.json().await.map_err(|e| {
-            SymphonyError::TrackerUnknownPayload {
+        response
+            .json()
+            .await
+            .map_err(|e| SymphonyError::TrackerUnknownPayload {
                 detail: format!("failed to parse installation token response: {e}"),
-            }
-        })
+            })
     }
 }
 

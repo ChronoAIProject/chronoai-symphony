@@ -13,23 +13,25 @@ pub fn validate_workspace_path(
     workspace_path: &Path,
     workspace_root: &Path,
 ) -> Result<(), SymphonyError> {
-    let canonical_root = workspace_root.canonicalize().map_err(|e| {
-        SymphonyError::WorkspaceError {
-            detail: format!(
-                "cannot canonicalize workspace root '{}': {e}",
-                workspace_root.display()
-            ),
-        }
-    })?;
+    let canonical_root =
+        workspace_root
+            .canonicalize()
+            .map_err(|e| SymphonyError::WorkspaceError {
+                detail: format!(
+                    "cannot canonicalize workspace root '{}': {e}",
+                    workspace_root.display()
+                ),
+            })?;
 
-    let canonical_path = workspace_path.canonicalize().map_err(|e| {
-        SymphonyError::WorkspaceError {
-            detail: format!(
-                "cannot canonicalize workspace path '{}': {e}",
-                workspace_path.display()
-            ),
-        }
-    })?;
+    let canonical_path =
+        workspace_path
+            .canonicalize()
+            .map_err(|e| SymphonyError::WorkspaceError {
+                detail: format!(
+                    "cannot canonicalize workspace path '{}': {e}",
+                    workspace_path.display()
+                ),
+            })?;
 
     // The workspace path must be a child of the root, not equal to it.
     if !canonical_path.starts_with(&canonical_root) || canonical_path == canonical_root {
@@ -43,10 +45,7 @@ pub fn validate_workspace_path(
     }
 
     // Validate the workspace key (final path component) contains only safe chars.
-    if let Some(key) = canonical_path
-        .file_name()
-        .and_then(|name| name.to_str())
-    {
+    if let Some(key) = canonical_path.file_name().and_then(|name| name.to_str()) {
         let valid_key = Regex::new(r"^[A-Za-z0-9._\-]+$").expect("invalid regex");
         if !valid_key.is_match(key) {
             return Err(SymphonyError::WorkspaceError {

@@ -19,15 +19,10 @@ pub enum OrchestratorEvent {
     },
 
     /// An agent event was received from a running worker.
-    CodexUpdate {
-        issue_id: String,
-        event: AgentEvent,
-    },
+    CodexUpdate { issue_id: String, event: AgentEvent },
 
     /// A retry timer has fired and the issue is eligible for re-dispatch.
-    RetryTimerFired {
-        issue_id: String,
-    },
+    RetryTimerFired { issue_id: String },
 
     /// The workflow configuration has been reloaded from disk.
     WorkflowReloaded {

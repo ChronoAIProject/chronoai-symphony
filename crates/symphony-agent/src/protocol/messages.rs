@@ -4,7 +4,7 @@
 //! formats for initialize, thread/start, and turn/start.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// A JSON-RPC 2.0 request with a numeric ID.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +73,7 @@ pub fn build_thread_start(
     approval_policy: &Value,
     sandbox: &Value,
     cwd: &str,
+    dynamic_tools: &[Value],
 ) -> JsonRpcRequest {
     JsonRpcRequest {
         id,
@@ -81,6 +82,7 @@ pub fn build_thread_start(
             "approvalPolicy": approval_policy,
             "sandbox": sandbox,
             "cwd": cwd,
+            "dynamicTools": dynamic_tools,
         }),
     }
 }
@@ -166,17 +168,26 @@ mod tests {
     fn thread_start_with_default_policy() {
         let policy = default_approval_policy();
         let sandbox = default_thread_sandbox();
-        let req = build_thread_start(2, &policy, &sandbox, "/tmp/ws");
+        let req = build_thread_start(2, &policy, &sandbox, "/tmp/ws", &[]);
         assert_eq!(req.method, "thread/start");
         assert_eq!(req.params["approvalPolicy"], "never");
         assert_eq!(req.params["sandbox"], "workspace-write");
+        assert_eq!(req.params["dynamicTools"], json!([]));
     }
 
     #[test]
     fn turn_start_wraps_prompt_in_input() {
         let policy = default_approval_policy();
         let sandbox = default_turn_sandbox_policy("/tmp/ws");
-        let req = build_turn_start(3, "thread-1", "Fix the bug", "/tmp/ws", "#42: Bug", &policy, &sandbox);
+        let req = build_turn_start(
+            3,
+            "thread-1",
+            "Fix the bug",
+            "/tmp/ws",
+            "#42: Bug",
+            &policy,
+            &sandbox,
+        );
         assert_eq!(req.method, "turn/start");
         let input = req.params["input"].as_array().unwrap();
         assert_eq!(input.len(), 1);
@@ -189,5 +200,14 @@ mod tests {
         let policy = default_turn_sandbox_policy("/tmp/ws/_42");
         assert_eq!(policy["type"], "workspaceWrite");
         assert_eq!(policy["writableRoots"][0], "/tmp/ws/_42");
+    }
+
+    #[test]
+    fn thread_start_includes_dynamic_tools() {
+        let policy = default_approval_policy();
+        let sandbox = default_thread_sandbox();
+        let tools = vec![json!({"name": "symphony_note"})];
+        let req = build_thread_start(2, &policy, &sandbox, "/tmp/ws", &tools);
+        assert_eq!(req.params["dynamicTools"], json!(tools));
     }
 }

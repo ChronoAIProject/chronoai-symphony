@@ -14,5 +14,6 @@
 //! | POST   | `/api/v1/approve/{approval_id}`   | Resolve a pending approval  |
 
 pub mod api;
+pub mod coordination;
 pub mod dashboard;
 pub mod router;

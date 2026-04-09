@@ -38,14 +38,10 @@ pub enum AgentEvent {
     },
 
     /// A turn was cancelled.
-    TurnCancelled {
-        timestamp: DateTime<Utc>,
-    },
+    TurnCancelled { timestamp: DateTime<Utc> },
 
     /// The agent requires user input to continue.
-    TurnInputRequired {
-        timestamp: DateTime<Utc>,
-    },
+    TurnInputRequired { timestamp: DateTime<Utc> },
 
     /// An approval request was received from the agent process.
     ApprovalRequested {
@@ -55,9 +51,7 @@ pub enum AgentEvent {
     },
 
     /// An approval request was auto-approved by the agent runner.
-    ApprovalAutoApproved {
-        timestamp: DateTime<Utc>,
-    },
+    ApprovalAutoApproved { timestamp: DateTime<Utc> },
 
     /// The agent attempted to call an unsupported tool.
     UnsupportedToolCall {
@@ -68,6 +62,16 @@ pub enum AgentEvent {
     /// A notification message from the agent process.
     Notification {
         message: String,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// A structured coordination action emitted by Symphony's built-in
+    /// workspace helpers (mailbox, note, claim).
+    CoordinationActivity {
+        action: String,
+        role: Option<String>,
+        target: Option<String>,
+        detail: Option<String>,
         timestamp: DateTime<Utc>,
     },
 
@@ -152,6 +156,24 @@ mod tests {
         match event {
             AgentEvent::SessionStarted { session_id, .. } => {
                 assert_eq!(session_id, "s1");
+            }
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn coordination_activity_carries_action_and_role() {
+        let event = AgentEvent::CoordinationActivity {
+            action: "mailbox.send".to_string(),
+            role: Some("backend-dev".to_string()),
+            target: Some("reviewer".to_string()),
+            detail: Some("Focus on token refresh".to_string()),
+            timestamp: Utc::now(),
+        };
+        match event {
+            AgentEvent::CoordinationActivity { action, role, .. } => {
+                assert_eq!(action, "mailbox.send");
+                assert_eq!(role.as_deref(), Some("backend-dev"));
             }
             _ => panic!("unexpected variant"),
         }

@@ -2,11 +2,12 @@
 
 use std::sync::Arc;
 
-use axum::routing::{get, post};
 use axum::Router;
+use axum::routing::{get, post};
 use symphony_orchestrator::approval_queue::PendingApprovalQueue;
 
 use crate::api;
+use crate::coordination::CoordinationStore;
 use crate::dashboard;
 
 /// Shared application state accessible from all request handlers.
@@ -36,6 +37,9 @@ pub struct AppState {
 
     /// Shared pending approval queue for human-in-the-loop decisions.
     pub approval_queue: Arc<PendingApprovalQueue>,
+
+    /// Shared coordination state backing mailbox and scope-claim APIs.
+    pub coordination: Arc<CoordinationStore>,
 }
 
 /// Build the Axum router with all routes and shared state.
@@ -55,13 +59,38 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/state", get(api::state::get_state))
         .route("/api/v1/refresh", post(api::refresh::post_refresh))
         .route(
+            "/api/v1/coordination/mailbox/read",
+            get(api::coordination::get_mailbox_read),
+        )
+        .route(
+            "/api/v1/coordination/mailbox/send",
+            post(api::coordination::post_mailbox_send),
+        )
+        .route(
+            "/api/v1/coordination/mailbox/ack",
+            post(api::coordination::post_mailbox_ack),
+        )
+        .route(
+            "/api/v1/coordination/notes/append",
+            post(api::coordination::post_note_append),
+        )
+        .route(
+            "/api/v1/coordination/claims/list",
+            get(api::coordination::get_claims_list),
+        )
+        .route(
+            "/api/v1/coordination/claims/claim",
+            post(api::coordination::post_claim_scope),
+        )
+        .route(
+            "/api/v1/coordination/claims/release",
+            post(api::coordination::post_release_scope),
+        )
+        .route(
             "/api/v1/approve/{approval_id}",
             post(api::approve::post_approve),
         )
-        .route(
-            "/api/v1/{issue_identifier}",
-            get(api::issue::get_issue),
-        )
+        .route("/api/v1/{issue_identifier}", get(api::issue::get_issue))
         .with_state(state)
 }
 
@@ -76,8 +105,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 /// be created.
 pub async fn start_server(router: Router, port: u16) -> Result<(), anyhow::Error> {
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-    tracing::info!("HTTP server listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    start_server_on_listener(router, listener).await
+}
+
+pub async fn start_server_on_listener(
+    router: Router,
+    listener: tokio::net::TcpListener,
+) -> Result<(), anyhow::Error> {
+    tracing::info!("HTTP server listening on {}", listener.local_addr()?);
     axum::serve(listener, router).await?;
     Ok(())
 }
@@ -109,6 +145,7 @@ mod tests {
             approval_queue: Arc::new(
                 symphony_orchestrator::approval_queue::PendingApprovalQueue::new(),
             ),
+            coordination: Arc::new(CoordinationStore::new()),
         })
     }
 

@@ -11,12 +11,14 @@ use chrono::Utc;
 use serde::Deserialize;
 use serde_json::Value;
 use symphony_core::error::SymphonyError;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
 use crate::process::AgentProcess;
 use crate::protocol::events::{AgentEvent, TokenUsage};
 use crate::protocol::streaming::TurnResult;
+
+const MAX_NOTIFICATION_CHARS: usize = 500;
 
 /// Token usage structure from Claude CLI output.
 #[derive(Debug, Deserialize)]
@@ -37,6 +39,154 @@ impl ClaudeUsage {
     }
 }
 
+fn truncate_notification(message: impl Into<String>) -> String {
+    let message = message.into();
+    if message.len() > MAX_NOTIFICATION_CHARS {
+        format!("{}...", &message[..MAX_NOTIFICATION_CHARS])
+    } else {
+        message
+    }
+}
+
+async fn emit_notification(event_tx: &mpsc::Sender<AgentEvent>, message: impl Into<String>) {
+    let _ = event_tx
+        .send(AgentEvent::Notification {
+            message: truncate_notification(message),
+            timestamp: Utc::now(),
+        })
+        .await;
+}
+
+fn non_empty_str(value: Option<&Value>) -> Option<&str> {
+    value
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn summarize_tool_input(input: Option<&Value>) -> Option<String> {
+    let input = input?;
+    non_empty_str(input.get("command"))
+        .map(|s| s.chars().take(120).collect::<String>())
+        .or_else(|| non_empty_str(input.get("file_path")).map(|s| s.to_string()))
+        .or_else(|| non_empty_str(input.get("pattern")).map(|s| s.to_string()))
+}
+
+fn summarize_system_event(parsed: &Value) -> Option<String> {
+    let subtype = parsed.get("subtype").and_then(|v| v.as_str())?;
+    match subtype {
+        "init" => {
+            let model = non_empty_str(parsed.get("model"));
+            let cwd = non_empty_str(parsed.get("cwd"));
+            match (model, cwd) {
+                (Some(model), Some(cwd)) => Some(format!("[session:init] model={model} cwd={cwd}")),
+                (Some(model), None) => Some(format!("[session:init] model={model}")),
+                (None, Some(cwd)) => Some(format!("[session:init] cwd={cwd}")),
+                (None, None) => Some("[session:init] Claude Code ready".to_string()),
+            }
+        }
+        "status" => {
+            let permission_mode = non_empty_str(parsed.get("permissionMode"));
+            let status = non_empty_str(parsed.get("status"));
+            match (permission_mode, status) {
+                (Some(mode), Some(status)) => {
+                    Some(format!("[session:status] {status} (permission={mode})"))
+                }
+                (Some(mode), None) => Some(format!("[session:status] permission={mode}")),
+                (None, Some(status)) => Some(format!("[session:status] {status}")),
+                (None, None) => None,
+            }
+        }
+        "hook_started" => {
+            let hook_name = non_empty_str(parsed.get("hook_name")).unwrap_or("hook");
+            let hook_event = non_empty_str(parsed.get("hook_event"));
+            Some(match hook_event {
+                Some(event) => format!("[hook:{hook_name}] started ({event})"),
+                None => format!("[hook:{hook_name}] started"),
+            })
+        }
+        "hook_progress" => {
+            let hook_name = non_empty_str(parsed.get("hook_name")).unwrap_or("hook");
+            let detail = non_empty_str(parsed.get("output"))
+                .or_else(|| non_empty_str(parsed.get("stdout")))
+                .or_else(|| non_empty_str(parsed.get("stderr")));
+            Some(match detail {
+                Some(detail) => format!("[hook:{hook_name}] {detail}"),
+                None => format!("[hook:{hook_name}] running"),
+            })
+        }
+        "hook_response" => {
+            let hook_name = non_empty_str(parsed.get("hook_name")).unwrap_or("hook");
+            let outcome = non_empty_str(parsed.get("outcome")).unwrap_or("completed");
+            let detail = non_empty_str(parsed.get("output"))
+                .or_else(|| non_empty_str(parsed.get("stdout")))
+                .or_else(|| non_empty_str(parsed.get("stderr")));
+            Some(match detail {
+                Some(detail) => format!("[hook:{hook_name}] {outcome}: {detail}"),
+                None => format!("[hook:{hook_name}] {outcome}"),
+            })
+        }
+        "task_started" => {
+            let description = non_empty_str(parsed.get("description")).unwrap_or("task started");
+            Some(format!("[task] {description}"))
+        }
+        "task_progress" => {
+            let detail = non_empty_str(parsed.get("summary"))
+                .or_else(|| non_empty_str(parsed.get("description")))
+                .unwrap_or("task in progress");
+            Some(format!("[task] {detail}"))
+        }
+        "task_notification" => {
+            let status = non_empty_str(parsed.get("status")).unwrap_or("updated");
+            let summary = non_empty_str(parsed.get("summary")).unwrap_or("task update");
+            Some(format!("[task:{status}] {summary}"))
+        }
+        "session_state_changed" => {
+            let state = non_empty_str(parsed.get("state")).unwrap_or("unknown");
+            Some(format!("[session] state={state}"))
+        }
+        "files_persisted" => {
+            let count = parsed
+                .get("files")
+                .and_then(|v| v.as_array())
+                .map(|files| files.len())
+                .unwrap_or(0);
+            Some(format!("[session] persisted {count} file(s)"))
+        }
+        "local_command_output" => {
+            non_empty_str(parsed.get("content")).map(|content| format!("[local] {content}"))
+        }
+        _ => None,
+    }
+}
+
+fn summarize_tool_progress_event(parsed: &Value) -> Option<String> {
+    let tool_name = non_empty_str(parsed.get("tool_name")).unwrap_or("tool");
+    let elapsed = parsed
+        .get("elapsed_time_seconds")
+        .and_then(|v| v.as_f64())
+        .or_else(|| {
+            parsed
+                .get("elapsed_time_seconds")
+                .and_then(|v| v.as_u64().map(|n| n as f64))
+        });
+    let task_id = non_empty_str(parsed.get("task_id"));
+
+    match (elapsed, task_id) {
+        (Some(elapsed), Some(task_id)) => Some(format!(
+            "[{tool_name}] running {:.0}s (task {task_id})",
+            elapsed
+        )),
+        (Some(elapsed), None) => Some(format!("[{tool_name}] running {:.0}s", elapsed)),
+        (None, Some(task_id)) => Some(format!("[{tool_name}] task {task_id}")),
+        (None, None) => Some(format!("[{tool_name}] running")),
+    }
+}
+
+fn summarize_tool_use_summary_event(parsed: &Value) -> Option<String> {
+    non_empty_str(parsed.get("summary")).map(|summary| summary.to_string())
+}
+
 /// Stream a complete Claude CLI session, parsing line-delimited JSON events.
 ///
 /// The Claude CLI with `--output-format stream-json` emits one JSON object
@@ -47,11 +197,12 @@ pub async fn stream_claude_session(
     process: &mut AgentProcess,
     event_tx: &mpsc::Sender<AgentEvent>,
     session_timeout: Duration,
+    cancel_rx: &mut watch::Receiver<bool>,
 ) -> Result<TurnResult, SymphonyError> {
     info!("streaming Claude CLI session output");
 
     let result = tokio::time::timeout(session_timeout, async {
-        stream_claude_inner(process, event_tx).await
+        stream_claude_inner(process, event_tx, cancel_rx).await
     })
     .await;
 
@@ -76,18 +227,30 @@ pub async fn stream_claude_session(
 async fn stream_claude_inner(
     process: &mut AgentProcess,
     event_tx: &mpsc::Sender<AgentEvent>,
+    cancel_rx: &mut watch::Receiver<bool>,
 ) -> Result<TurnResult, SymphonyError> {
     let mut got_result = false;
     let mut final_result = TurnResult::ProcessExited;
     let mut last_message_at = std::time::Instant::now();
 
     loop {
-        let line = match tokio::time::timeout(
-            Duration::from_secs(60),
-            process.read_line(),
-        )
-        .await
-        {
+        let line = match tokio::select! {
+            changed = cancel_rx.changed() => {
+                match changed {
+                    Ok(()) if *cancel_rx.borrow() => {
+                        info!("Claude CLI session cancelled by orchestrator");
+                        let _ = process.kill().await;
+                        let _ = event_tx
+                            .send(AgentEvent::TurnCancelled { timestamp: Utc::now() })
+                            .await;
+                        return Ok(TurnResult::Cancelled);
+                    }
+                    Ok(()) => continue,
+                    Err(_) => continue,
+                }
+            }
+            result = tokio::time::timeout(Duration::from_secs(60), process.read_line()) => result,
+        } {
             Ok(result) => match result? {
                 Some(line) if line.is_empty() => continue,
                 Some(line) => {
@@ -107,10 +270,7 @@ async fn stream_claude_inner(
                         break;
                     }
                     Ok(None) => {
-                        info!(
-                            idle_secs,
-                            "Claude CLI still running, waiting for output"
-                        );
+                        info!(idle_secs, "Claude CLI still running, waiting for output");
                     }
                     Err(e) => {
                         warn!(error = %e, "failed to check Claude CLI status");
@@ -131,32 +291,18 @@ async fn stream_claude_inner(
             }
         };
 
-        let event_type = parsed
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let event_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
         debug!(event_type, "Claude CLI event received");
 
         match event_type {
             "system" => {
-                let session_id = parsed
-                    .get("session_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("claude-session")
-                    .to_string();
-                let message = parsed
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Claude CLI session started")
-                    .to_string();
-                let _ = event_tx
-                    .send(AgentEvent::Notification {
-                        message: format!("[system] {message}"),
-                        timestamp: Utc::now(),
-                    })
-                    .await;
-                debug!(session_id, "Claude CLI system event");
+                if let Some(message) = summarize_system_event(&parsed) {
+                    emit_notification(event_tx, message).await;
+                }
+                if let Some(session_id) = parsed.get("session_id").and_then(|v| v.as_str()) {
+                    debug!(session_id, "Claude CLI system event");
+                }
             }
 
             "assistant" => {
@@ -168,24 +314,24 @@ async fn stream_claude_inner(
                     .get("tool")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                let input_summary = parsed.get("input").and_then(|input| {
-                    input.get("command").and_then(|v| v.as_str())
-                        .map(|s| s.chars().take(120).collect::<String>())
-                    .or_else(|| input.get("file_path").and_then(|v| v.as_str())
-                        .map(|s| s.to_string()))
-                    .or_else(|| input.get("pattern").and_then(|v| v.as_str())
-                        .map(|s| s.to_string()))
-                });
+                let input_summary = summarize_tool_input(parsed.get("input"));
                 let msg = match input_summary {
                     Some(summary) => format!("[{tool_name}] {summary}"),
                     None => format!("[{tool_name}]"),
                 };
-                let _ = event_tx
-                    .send(AgentEvent::Notification {
-                        message: msg,
-                        timestamp: Utc::now(),
-                    })
-                    .await;
+                emit_notification(event_tx, msg).await;
+            }
+
+            "tool_progress" => {
+                if let Some(message) = summarize_tool_progress_event(&parsed) {
+                    emit_notification(event_tx, message).await;
+                }
+            }
+
+            "tool_use_summary" => {
+                if let Some(message) = summarize_tool_use_summary_event(&parsed) {
+                    emit_notification(event_tx, message).await;
+                }
             }
 
             "rate_limit_event" => {
@@ -250,23 +396,12 @@ async fn stream_claude_inner(
                     final_result = TurnResult::Failed(error_msg);
                 } else {
                     if !result_text.is_empty() {
-                        let truncated = if result_text.len() > 500 {
-                            format!("{}...", &result_text[..500])
-                        } else {
-                            result_text
-                        };
-                        let _ = event_tx
-                            .send(AgentEvent::Notification {
-                                message: truncated,
-                                timestamp: Utc::now(),
-                            })
-                            .await;
+                        emit_notification(event_tx, result_text).await;
                     }
                     let _ = event_tx
                         .send(AgentEvent::TurnCompleted {
                             timestamp: Utc::now(),
-                            usage: extract_claude_usage(&parsed)
-                                .map(|u| u.to_token_usage()),
+                            usage: extract_claude_usage(&parsed).map(|u| u.to_token_usage()),
                         })
                         .await;
                     final_result = TurnResult::Completed;
@@ -275,6 +410,12 @@ async fn stream_claude_inner(
 
             other => {
                 debug!(event_type = other, "unhandled Claude CLI event type");
+                let _ = event_tx
+                    .send(AgentEvent::OtherMessage {
+                        raw: parsed.clone(),
+                        timestamp: Utc::now(),
+                    })
+                    .await;
             }
         }
     }
@@ -305,10 +446,7 @@ async fn stream_claude_inner(
 ///
 /// Parses `message.content` array for text and tool_use blocks,
 /// and extracts usage information.
-async fn handle_assistant_event(
-    parsed: &Value,
-    event_tx: &mpsc::Sender<AgentEvent>,
-) {
+async fn handle_assistant_event(parsed: &Value, event_tx: &mpsc::Sender<AgentEvent>) {
     // Extract content blocks from message.content.
     let content = parsed
         .get("message")
@@ -319,10 +457,7 @@ async fn handle_assistant_event(
         let mut text_parts = Vec::new();
 
         for block in blocks {
-            let block_type = block
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
             match block_type {
                 "text" => {
@@ -335,28 +470,12 @@ async fn handle_assistant_event(
                         .get("name")
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown");
-                    // Extract a summary of the tool input for context.
-                    let input_summary = block.get("input").and_then(|input| {
-                        // For Bash: show the command
-                        input.get("command").and_then(|v| v.as_str())
-                            .map(|s| s.chars().take(120).collect::<String>())
-                        // For Read/Edit: show the file path
-                        .or_else(|| input.get("file_path").and_then(|v| v.as_str())
-                            .map(|s| s.to_string()))
-                        // For Glob/Grep: show the pattern
-                        .or_else(|| input.get("pattern").and_then(|v| v.as_str())
-                            .map(|s| s.to_string()))
-                    });
+                    let input_summary = summarize_tool_input(block.get("input"));
                     let msg = match input_summary {
                         Some(summary) => format!("[{tool_name}] {summary}"),
                         None => format!("[{tool_name}]"),
                     };
-                    let _ = event_tx
-                        .send(AgentEvent::Notification {
-                            message: msg,
-                            timestamp: Utc::now(),
-                        })
-                        .await;
+                    emit_notification(event_tx, msg).await;
                 }
                 "tool_result" => {
                     // Skip tool_result notifications - they're verbose and
@@ -370,24 +489,12 @@ async fn handle_assistant_event(
 
         if !text_parts.is_empty() {
             let combined = text_parts.join("\n");
-            let truncated = if combined.len() > 500 {
-                format!("{}...", &combined[..500])
-            } else {
-                combined
-            };
-            let _ = event_tx
-                .send(AgentEvent::Notification {
-                    message: truncated,
-                    timestamp: Utc::now(),
-                })
-                .await;
+            emit_notification(event_tx, combined).await;
         }
     }
 
     // Extract usage from message.usage.
-    let usage = parsed
-        .get("message")
-        .and_then(|m| m.get("usage"));
+    let usage = parsed.get("message").and_then(|m| m.get("usage"));
 
     if let Some(usage_val) = usage {
         if let Ok(claude_usage) = serde_json::from_value::<ClaudeUsage>(usage_val.clone()) {
@@ -403,7 +510,8 @@ async fn handle_assistant_event(
 
 /// Extract usage from a result or assistant event.
 fn extract_claude_usage(parsed: &Value) -> Option<ClaudeUsage> {
-    let usage_val = parsed.get("usage")
+    let usage_val = parsed
+        .get("usage")
         .or_else(|| parsed.get("message").and_then(|m| m.get("usage")))?;
     serde_json::from_value::<ClaudeUsage>(usage_val.clone()).ok()
 }
@@ -500,10 +608,7 @@ mod tests {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         assert!(!is_error);
-        let result_text = event
-            .get("result")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let result_text = event.get("result").and_then(|v| v.as_str()).unwrap_or("");
         assert_eq!(result_text, "All tests pass");
     }
 
@@ -529,14 +634,15 @@ mod tests {
     fn parse_system_event() {
         let event = json!({
             "type": "system",
+            "subtype": "init",
             "session_id": "abc-123",
-            "message": "Claude Code session started"
+            "model": "claude-sonnet-4-6",
+            "cwd": "/repo"
         });
-        let session_id = event
-            .get("session_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("claude-session");
-        assert_eq!(session_id, "abc-123");
+        assert_eq!(
+            summarize_system_event(&event).as_deref(),
+            Some("[session:init] model=claude-sonnet-4-6 cwd=/repo")
+        );
     }
 
     #[test]
@@ -585,7 +691,54 @@ mod tests {
             .and_then(|m| m.get("content"))
             .and_then(|c| c.as_array())
             .unwrap();
-        assert_eq!(content[0].get("type").and_then(|v| v.as_str()), Some("tool_use"));
-        assert_eq!(content[0].get("name").and_then(|v| v.as_str()), Some("bash"));
+        assert_eq!(
+            content[0].get("type").and_then(|v| v.as_str()),
+            Some("tool_use")
+        );
+        assert_eq!(
+            content[0].get("name").and_then(|v| v.as_str()),
+            Some("bash")
+        );
+    }
+
+    #[test]
+    fn summarize_hook_response_event() {
+        let event = json!({
+            "type": "system",
+            "subtype": "hook_response",
+            "hook_name": "PreToolUse",
+            "outcome": "success",
+            "output": "validated"
+        });
+        assert_eq!(
+            summarize_system_event(&event).as_deref(),
+            Some("[hook:PreToolUse] success: validated")
+        );
+    }
+
+    #[test]
+    fn summarize_tool_progress_event_with_task_id() {
+        let event = json!({
+            "type": "tool_progress",
+            "tool_name": "Bash",
+            "elapsed_time_seconds": 12.7,
+            "task_id": "task-42"
+        });
+        assert_eq!(
+            summarize_tool_progress_event(&event).as_deref(),
+            Some("[Bash] running 13s (task task-42)")
+        );
+    }
+
+    #[test]
+    fn summarize_tool_use_summary_event_passes_through_summary() {
+        let event = json!({
+            "type": "tool_use_summary",
+            "summary": "Read 3 files, ran 2 commands"
+        });
+        assert_eq!(
+            summarize_tool_use_summary_event(&event).as_deref(),
+            Some("Read 3 files, ran 2 commands")
+        );
     }
 }
