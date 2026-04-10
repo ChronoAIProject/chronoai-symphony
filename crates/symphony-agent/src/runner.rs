@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
-use serde_json::Value;
+use serde_json::{Value, json};
 use symphony_core::domain::{AgentProfileConfig, Issue};
 use symphony_core::error::SymphonyError;
 use tokio::sync::{mpsc, watch};
@@ -103,12 +103,18 @@ impl AgentRunner {
 
     fn resolve_turn_sandbox_policy(&self, workspace_path: &str) -> Value {
         let mut policy = match &self.profile.turn_sandbox_policy {
+            Some(s) if s.trim() == "danger-full-access" => {
+                json!({"type": "dangerFullAccess"})
+            }
             Some(s) => serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.clone())),
             None => match self.profile.thread_sandbox.as_deref().map(str::trim) {
                 // Keep full-access sessions actually full-access across both
                 // thread/start and turn/start unless the workflow overrides the
                 // turn sandbox policy explicitly.
-                Some("danger-full-access") => Value::String("danger-full-access".to_string()),
+                // Codex v0.118.0+ requires the tagged enum format for turn/start
+                // sandboxPolicy: {"type": "dangerFullAccess"} instead of the
+                // plain string "danger-full-access" (which thread/start still accepts).
+                Some("danger-full-access") => json!({"type": "dangerFullAccess"}),
                 _ => default_turn_sandbox_policy(workspace_path),
             },
         };
@@ -600,6 +606,8 @@ mod tests {
         let runner = AgentRunner::new(codex_profile());
         let policy = runner.resolve_turn_sandbox_policy("/tmp/ws");
 
-        assert_eq!(policy, Value::String("danger-full-access".to_string()));
+        // Codex v0.118.0+ requires the tagged enum format for turn/start.
+        // networkAccess is injected from the profile config.
+        assert_eq!(policy, json!({"type": "dangerFullAccess", "networkAccess": true}));
     }
 }

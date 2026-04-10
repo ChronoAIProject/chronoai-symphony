@@ -96,6 +96,7 @@ agents:
   codex:
     command: codex app-server
     approval_policy: never
+    thread_sandbox: danger-full-access   # Allows git commit, push, etc.
     # model: gpt-5.3-codex
     # reasoning_effort: xhigh
     network_access: true
