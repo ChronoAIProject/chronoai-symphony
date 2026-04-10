@@ -922,6 +922,8 @@ graph TB
 pip install mempalace
 ```
 
+> **PATH note:** `pip install mempalace` registers a console script, but on many systems (especially macOS) the binary lands outside `$PATH` (e.g. `/Library/Frameworks/Python.framework/.../bin/`). Use `python3 -m mempalace` in hooks and scripts to bypass the PATH issue entirely. All examples below use this pattern.
+
 **Shared across all agents.** Memory is not per-agent or per-agent-type. When the Codex implementer stores a decision on issue #42, the Claude reviewer on the same issue can read it, and the Codex implementer on issue #43 can find it later. The palace is the shared substrate -- all agents contribute to and read from the same store.
 
 **Hook configuration:**
@@ -934,15 +936,14 @@ hooks:
     git clone --depth 1 https://github.com/your-org/your-repo.git .
 
     # mempalace: mine project into shared palace (one-time, skipped on later issues)
-    if command -v mempalace >/dev/null 2>&1; then
-      SLUG="$(git remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git$||')"
-      if [ -n "$SLUG" ]; then
-        MARKER="$HOME/.mempalace/.mined_$(echo "$SLUG" | tr '/' '-')"
-        if [ ! -f "$MARKER" ]; then
-          mempalace init 2>/dev/null || true
-          mempalace mine . --mode projects 2>/dev/null || true
-          touch "$MARKER"
-        fi
+    MP="python3 -m mempalace"
+    SLUG="$(git remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git$||')"
+    if [ -n "$SLUG" ]; then
+      MARKER="$HOME/.mempalace/.mined_$(echo "$SLUG" | tr '/' '-')"
+      if [ ! -f "$MARKER" ]; then
+        $MP init 2>/dev/null || true
+        $MP mine . --mode projects 2>/dev/null || true
+        touch "$MARKER"
       fi
     fi
 
@@ -952,24 +953,24 @@ hooks:
 
     # mempalace: load relevant memories for ALL agents (Claude, Codex, any future agent).
     # Every agent reads .symphony/mempalace_context.md at session start.
-    if command -v mempalace >/dev/null 2>&1; then
-      mkdir -p .symphony
-      mempalace search "issue ${SYMPHONY_ISSUE_NUMBER}" --limit 10 \
-        > .symphony/mempalace_context.md 2>/dev/null || true
-    fi
+    MP="python3 -m mempalace"
+    mkdir -p .symphony
+    $MP search "issue ${SYMPHONY_ISSUE_NUMBER}" --limit 10 \
+      > .symphony/mempalace_context.md 2>/dev/null || true
 
     # Register MCP server so Claude Code gets interactive read/write on top.
     # `claude mcp add --scope local` merges into .claude/settings.local.json
     # without clobbering existing settings. Idempotent.
-    if command -v claude >/dev/null 2>&1 && command -v mempalace >/dev/null 2>&1; then
-      claude mcp add --scope local mempalace -- python -m mempalace.mcp_server
+    if command -v claude >/dev/null 2>&1; then
+      claude mcp add --scope local mempalace -- python3 -m mempalace.mcp_server 2>/dev/null || true
     fi
 
   after_run: |
     # mempalace: store coordination artifacts back into shared palace so the
     # next agent (any type, any issue) can find what this session decided.
-    if command -v mempalace >/dev/null 2>&1 && [ -d .symphony/coordination ]; then
-      mempalace mine .symphony/coordination --mode general 2>/dev/null || true
+    MP="python3 -m mempalace"
+    if [ -d .symphony/coordination ]; then
+      $MP mine .symphony/coordination --mode general 2>/dev/null || true
     fi
 ```
 

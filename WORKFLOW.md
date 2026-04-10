@@ -32,18 +32,20 @@ git:
 hooks:
   after_create: |
     git clone --depth 1 https://github.com/your-org/your-repo.git .
-    # Optional: mempalace agent memory (pip install mempalace). See README § Agent memory.
-    # Mines the project once into a shared palace at ~/.mempalace/. The marker file
-    # prevents re-mining when later issues create new workspaces for the same project.
-    # if command -v mempalace >/dev/null 2>&1; then
-    #   SLUG="$(git remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git$||')"
-    #   if [ -n "$SLUG" ]; then
-    #     MARKER="$HOME/.mempalace/.mined_$(echo "$SLUG" | tr '/' '-')"
-    #     if [ ! -f "$MARKER" ]; then
-    #       mempalace init 2>/dev/null || true
-    #       mempalace mine . --mode projects 2>/dev/null || true
-    #       touch "$MARKER"
-    #     fi
+    # Optional: mempalace agent memory. See README § Agent memory.
+    # NOTE: `pip install mempalace` installs the binary outside $PATH on many
+    # systems (e.g. /Library/Frameworks/.../bin/ on macOS). Using
+    # `python3 -m mempalace` bypasses the PATH issue entirely.
+    # Mines the project once into a shared palace at ~/.mempalace/. The marker
+    # file prevents re-mining when later issues create new workspaces.
+    # MP="python3 -m mempalace"
+    # SLUG="$(git remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git$||')"
+    # if [ -n "$SLUG" ]; then
+    #   MARKER="$HOME/.mempalace/.mined_$(echo "$SLUG" | tr '/' '-')"
+    #   if [ ! -f "$MARKER" ]; then
+    #     $MP init 2>/dev/null || true
+    #     $MP mine . --mode projects 2>/dev/null || true
+    #     touch "$MARKER"
     #   fi
     # fi
   before_run: |
@@ -60,21 +62,21 @@ hooks:
     fi
     # Optional: mempalace shared context for all agents (Claude, Codex, any future agent).
     # Loads relevant memories into a workspace file every agent can read.
-    # if command -v mempalace >/dev/null 2>&1; then
-    #   mkdir -p .symphony
-    #   mempalace search "issue ${SYMPHONY_ISSUE_NUMBER}" --limit 10 \
-    #     > .symphony/mempalace_context.md 2>/dev/null || true
-    # fi
+    # MP="python3 -m mempalace"
+    # mkdir -p .symphony
+    # $MP search "issue ${SYMPHONY_ISSUE_NUMBER}" --limit 10 \
+    #   > .symphony/mempalace_context.md 2>/dev/null || true
     # Register MCP server so Claude Code gets interactive read/write on top.
-    # if command -v claude >/dev/null 2>&1 && command -v mempalace >/dev/null 2>&1; then
-    #   claude mcp add --scope local mempalace -- python -m mempalace.mcp_server
+    # if command -v claude >/dev/null 2>&1; then
+    #   claude mcp add --scope local mempalace -- python3 -m mempalace.mcp_server 2>/dev/null || true
     # fi
   after_run: |
     echo "Agent session completed for ${SYMPHONY_ISSUE_IDENTIFIER}"
     # Optional: store coordination artifacts back into shared mempalace so the
     # next agent (any type) can find what this session decided or handed off.
-    # if command -v mempalace >/dev/null 2>&1 && [ -d .symphony/coordination ]; then
-    #   mempalace mine .symphony/coordination --mode general 2>/dev/null || true
+    # MP="python3 -m mempalace"
+    # if [ -d .symphony/coordination ]; then
+    #   $MP mine .symphony/coordination --mode general 2>/dev/null || true
     # fi
   timeout_ms: 300000
 
@@ -144,6 +146,8 @@ agents:
 #         2. Add labels: `backend`, `frontend`, or both (for parallel agents).
 #         3. If complex: create a workpad comment with an implementation plan.
 #         4. Move to in-progress: `gh issue edit {{ issue.identifier }} --remove-label todo --add-label in-progress`
+#
+#         {{ default_prompt }}
 #       transition_to: in-progress
 #
 #     # Parallel: backend + frontend agents when triage adds both labels
@@ -174,6 +178,8 @@ agents:
 #         Review PR for {{ issue.identifier }}: `gh pr diff`
 #         If good: add label `human-review`, remove `code-review`.
 #         If needs work: post review comments, add label `rework`, remove `code-review`.
+#
+#         {{ default_prompt }}
 #       transition_to: human-review
 #       reject_to: rework
 #     - state: rework
