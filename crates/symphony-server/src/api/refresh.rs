@@ -4,10 +4,10 @@
 
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::router::AppState;
 
@@ -29,9 +29,7 @@ use crate::router::AppState;
 ///     "operations": ["poll", "reconcile"]
 /// }
 /// ```
-pub async fn post_refresh(
-    State(state): State<Arc<AppState>>,
-) -> (StatusCode, Json<Value>) {
+pub async fn post_refresh(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let send_result = state
         .orchestrator_tx
         .send(symphony_orchestrator::events::OrchestratorEvent::RefreshRequested)

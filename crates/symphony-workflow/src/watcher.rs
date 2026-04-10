@@ -4,10 +4,10 @@
 //! and sends events through a channel for the orchestrator to consume.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
+use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
@@ -76,15 +76,11 @@ impl WorkflowWatcher {
         let debounce_duration = std::time::Duration::from_millis(100);
         let mut debouncer = new_debouncer(debounce_duration, notify_tx)?;
 
-        let watch_path = self
-            .path
-            .parent()
-            .unwrap_or_else(|| self.path.as_ref());
+        let watch_path = self.path.parent().unwrap_or_else(|| self.path.as_ref());
 
-        debouncer.watcher().watch(
-            watch_path,
-            notify::RecursiveMode::NonRecursive,
-        )?;
+        debouncer
+            .watcher()
+            .watch(watch_path, notify::RecursiveMode::NonRecursive)?;
 
         info!(path = %self.path.display(), "started watching workflow file");
 
@@ -170,6 +166,7 @@ impl WorkflowWatcher {
 fn reload_workflow(path: &PathBuf) -> Result<(ServiceConfig, String), anyhow::Error> {
     let workflow = load_workflow(path)?;
     let config = build_config(&workflow)?;
+    crate::validation::validate_dispatch_config(&config)?;
     Ok((config, workflow.prompt_template))
 }
 

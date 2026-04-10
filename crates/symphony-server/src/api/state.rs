@@ -4,8 +4,8 @@
 
 use std::sync::Arc;
 
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
 use serde_json::Value;
 
 use crate::router::AppState;
@@ -32,9 +32,7 @@ use crate::router::AppState;
 ///     "rate_limits": null
 /// }
 /// ```
-pub async fn get_state(
-    State(state): State<Arc<AppState>>,
-) -> Json<Value> {
+pub async fn get_state(State(state): State<Arc<AppState>>) -> Json<Value> {
     let snapshot = (state.snapshot_fn)();
     Json(snapshot)
 }

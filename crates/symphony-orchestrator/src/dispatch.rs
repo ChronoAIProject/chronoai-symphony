@@ -41,7 +41,11 @@ pub fn is_dispatch_eligible(
     // agent runs. Only collaborators can add labels.
     if let Some(ref required) = config.agent_require_label {
         let required_lower = required.to_lowercase();
-        if !issue.labels.iter().any(|l| l.to_lowercase() == required_lower) {
+        if !issue
+            .labels
+            .iter()
+            .any(|l| l.to_lowercase() == required_lower)
+        {
             debug!(
                 issue_id = %issue.id,
                 required_label = %required,
@@ -80,10 +84,16 @@ pub fn is_dispatch_eligible(
     // Legacy fallback: hardcoded handoff states when no pipeline configured.
     if config.pipeline_stages.is_empty() {
         let handoff_states = [
-            "human review", "human-review", "humanreview",
-            "merging", "blocked",
+            "human review",
+            "human-review",
+            "humanreview",
+            "merging",
+            "blocked",
         ];
-        if handoff_states.iter().any(|h| normalize_state(h) == normalized_state) {
+        if handoff_states
+            .iter()
+            .any(|h| normalize_state(h) == normalized_state)
+        {
             debug!(
                 issue_id = %issue.id,
                 state = %issue.state,
@@ -112,17 +122,14 @@ pub fn is_dispatch_eligible(
     if !stages.is_empty() {
         // Pipeline mode: an issue can be dispatched multiple times if it has
         // multiple stages. Check whether ALL non-none stages are already running.
-        let actionable_stages: Vec<_> = stages
-            .iter()
-            .filter(|s| s.agent != "none")
-            .collect();
+        let actionable_stages: Vec<_> = stages.iter().filter(|s| s.agent != "none").collect();
         if !actionable_stages.is_empty() {
             let all_stages_running = actionable_stages.iter().all(|s| {
                 let role = s.role.as_deref().unwrap_or(&s.agent);
-                state.running.values().any(|e| {
-                    e.issue.id == issue.id
-                        && e.stage_role.as_deref() == Some(role)
-                })
+                state
+                    .running
+                    .values()
+                    .any(|e| e.issue.id == issue.id && e.stage_role.as_deref() == Some(role))
             });
             if all_stages_running {
                 debug!(
@@ -147,11 +154,7 @@ pub fn is_dispatch_eligible(
     }
 
     // Concurrency limits.
-    if !has_available_slots(
-        state,
-        &issue.state,
-        &config.agent_max_concurrent_by_state,
-    ) {
+    if !has_available_slots(state, &issue.state, &config.agent_max_concurrent_by_state) {
         debug!(issue_id = %issue.id, "skipping issue: no available slots");
         return false;
     }
@@ -223,7 +226,10 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
     use std::collections::{HashMap, HashSet};
-    use symphony_core::domain::{AgentProfileConfig, AgentType, BlockerRef, CodexTotals, HooksConfig, PipelineStage, RunningEntry};
+    use symphony_core::domain::{
+        AgentProfileConfig, AgentType, BlockerRef, CodexTotals, HooksConfig, PipelineStage,
+        RunningEntry,
+    };
 
     fn empty_state() -> OrchestratorState {
         OrchestratorState {
@@ -252,6 +258,8 @@ mod tests {
             reasoning_effort: None,
             network_access: true,
             max_turns: None,
+            allowed_tools: vec![],
+            disallowed_tools: vec![],
         };
         let mut agent_profiles = HashMap::new();
         agent_profiles.insert("codex".to_string(), default_profile);
@@ -298,6 +306,8 @@ mod tests {
             codex_network_access: true,
             codex_auto_merge: false,
             pipeline_stages: vec![],
+            prompt_state_instructions: HashMap::new(),
+            prompt_role_instructions: HashMap::new(),
         }
     }
 
@@ -363,11 +373,13 @@ mod tests {
                 identifier: "#1".to_string(),
                 issue: issue.clone(),
                 agent_type: "codex".to_string(),
+                stall_timeout_ms: 300_000,
                 session_id: None,
                 codex_app_server_pid: None,
                 last_codex_message: None,
                 last_codex_event: None,
                 last_codex_timestamp: None,
+                stop_requested_at: None,
                 codex_input_tokens: 0,
                 codex_output_tokens: 0,
                 codex_total_tokens: 0,
@@ -482,10 +494,7 @@ mod tests {
 
     fn pipeline_config_with_two_stages() -> ServiceConfig {
         let mut config = default_config();
-        config.tracker_active_states = vec![
-            "Todo".to_string(),
-            "In Progress".to_string(),
-        ];
+        config.tracker_active_states = vec!["Todo".to_string(), "In Progress".to_string()];
         config.pipeline_stages = vec![
             PipelineStage {
                 state: "in progress".to_string(),
@@ -532,11 +541,13 @@ mod tests {
             identifier: "#1".to_string(),
             issue: issue.clone(),
             agent_type: "codex".to_string(),
+            stall_timeout_ms: 300_000,
             session_id: None,
             codex_app_server_pid: None,
             last_codex_message: None,
             last_codex_event: None,
             last_codex_timestamp: None,
+            stop_requested_at: None,
             codex_input_tokens: 0,
             codex_output_tokens: 0,
             codex_total_tokens: 0,
@@ -549,7 +560,9 @@ mod tests {
             started_at: Utc::now(),
             turn_count: 0,
         };
-        state.running.insert("1:backend-implementer".to_string(), entry);
+        state
+            .running
+            .insert("1:backend-implementer".to_string(), entry);
 
         // Issue should still be eligible because frontend stage is not running.
         assert!(is_dispatch_eligible(&issue, &state, &config));
@@ -569,11 +582,13 @@ mod tests {
                 identifier: "#1".to_string(),
                 issue: issue.clone(),
                 agent_type: "codex".to_string(),
+                stall_timeout_ms: 300_000,
                 session_id: None,
                 codex_app_server_pid: None,
                 last_codex_message: None,
                 last_codex_event: None,
                 last_codex_timestamp: None,
+                stop_requested_at: None,
                 codex_input_tokens: 0,
                 codex_output_tokens: 0,
                 codex_total_tokens: 0,
@@ -582,7 +597,7 @@ mod tests {
                 last_reported_total_tokens: 0,
                 retry_attempt: None,
                 stage_role: Some("backend-implementer".to_string()),
-            dispatched_state: "In Progress".to_string(),
+                dispatched_state: "In Progress".to_string(),
                 started_at: Utc::now(),
                 turn_count: 0,
             },
@@ -593,11 +608,13 @@ mod tests {
                 identifier: "#1".to_string(),
                 issue: issue.clone(),
                 agent_type: "claude".to_string(),
+                stall_timeout_ms: 300_000,
                 session_id: None,
                 codex_app_server_pid: None,
                 last_codex_message: None,
                 last_codex_event: None,
                 last_codex_timestamp: None,
+                stop_requested_at: None,
                 codex_input_tokens: 0,
                 codex_output_tokens: 0,
                 codex_total_tokens: 0,

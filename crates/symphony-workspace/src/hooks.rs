@@ -43,11 +43,10 @@ pub async fn run_hook(
         cmd.env("SYMPHONY_ISSUE_NUMBER", num);
     }
 
-    let mut child = cmd.spawn()
-        .map_err(|e| SymphonyError::HookError {
-            hook: hook_name.to_owned(),
-            detail: format!("failed to spawn bash: {e}"),
-        })?;
+    let mut child = cmd.spawn().map_err(|e| SymphonyError::HookError {
+        hook: hook_name.to_owned(),
+        detail: format!("failed to spawn bash: {e}"),
+    })?;
 
     // Take ownership of the stdio handles so we can read them independently
     // of the child lifetime, allowing us to still call kill() on timeout.
@@ -96,9 +95,7 @@ pub async fn run_hook(
                 warn!(hook = hook_name, exit_code = ?code, "hook failed");
                 Err(SymphonyError::HookError {
                     hook: hook_name.to_owned(),
-                    detail: format!(
-                        "exited with code {code:?}; stderr: {stderr}"
-                    ),
+                    detail: format!("exited with code {code:?}; stderr: {stderr}"),
                 })
             }
         }
@@ -110,7 +107,10 @@ pub async fn run_hook(
             })
         }
         Err(_elapsed) => {
-            warn!(hook = hook_name, timeout_ms, "hook timed out, killing process");
+            warn!(
+                hook = hook_name,
+                timeout_ms, "hook timed out, killing process"
+            );
             // Best-effort kill; ignore errors if the process already exited.
             let _ = child.kill().await;
             Err(SymphonyError::HookTimeout {

@@ -20,8 +20,7 @@ use tracing_subscriber::EnvFilter;
 ///
 /// Panics if a global subscriber has already been set.
 pub fn init_logging() {
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
@@ -32,8 +31,7 @@ pub fn init_logging() {
         .with_line_number(true)
         .finish();
 
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("failed to set tracing subscriber");
+    tracing::subscriber::set_global_default(subscriber).expect("failed to set tracing subscriber");
 }
 
 /// Initialize the global tracing subscriber with human-readable output.
@@ -45,8 +43,7 @@ pub fn init_logging() {
 ///
 /// Panics if a global subscriber has already been set.
 pub fn init_logging_pretty() {
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
@@ -57,8 +54,7 @@ pub fn init_logging_pretty() {
         .with_line_number(true)
         .finish();
 
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("failed to set tracing subscriber");
+    tracing::subscriber::set_global_default(subscriber).expect("failed to set tracing subscriber");
 }
 
 #[cfg(test)]
@@ -72,8 +68,7 @@ mod tests {
     #[test]
     fn default_env_filter_is_info() {
         // Verify that the fallback filter parses correctly.
-        let filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("info"));
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
         let formatted = format!("{filter}");
         assert!(
             formatted.contains("info"),

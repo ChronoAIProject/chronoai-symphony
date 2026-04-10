@@ -165,8 +165,8 @@ fn extract_priority(labels: &[String]) -> Option<i32> {
 /// Matches patterns like "blocked by #N" and "depends on #N"
 /// (case-insensitive).
 fn parse_blockers(body: &str) -> Vec<BlockerRef> {
-    let re = Regex::new(r"(?i)(?:blocked\s+by|depends\s+on)\s+#(\d+)")
-        .expect("invalid blocker regex");
+    let re =
+        Regex::new(r"(?i)(?:blocked\s+by|depends\s+on)\s+#(\d+)").expect("invalid blocker regex");
 
     re.captures_iter(body)
         .map(|cap| {
@@ -186,10 +186,7 @@ mod tests {
     use serde_json::json;
 
     fn active_states() -> Vec<String> {
-        vec![
-            "Todo".to_owned(),
-            "In Progress".to_owned(),
-        ]
+        vec!["Todo".to_owned(), "In Progress".to_owned()]
     }
 
     fn terminal_states() -> Vec<String> {
@@ -216,41 +213,30 @@ mod tests {
 
     #[test]
     fn normalizes_open_issue_with_active_label() {
-        let issue = normalize_github_issue(
-            &sample_issue(),
-            &active_states(),
-            &terminal_states(),
-        )
-        .unwrap();
+        let issue =
+            normalize_github_issue(&sample_issue(), &active_states(), &terminal_states()).unwrap();
 
         assert_eq!(issue.id, "#42");
         assert_eq!(issue.identifier, "#42");
         assert_eq!(issue.title, "Fix the widget");
         assert_eq!(issue.state, "In Progress");
         assert_eq!(issue.priority, Some(2));
-        assert_eq!(issue.url.as_deref(), Some("https://github.com/owner/repo/issues/42"));
+        assert_eq!(
+            issue.url.as_deref(),
+            Some("https://github.com/owner/repo/issues/42")
+        );
         assert!(issue.branch_name.is_none());
         assert_eq!(issue.labels, vec!["in progress", "priority:2", "bug"]);
     }
 
     #[test]
     fn extracts_blockers_from_body() {
-        let issue = normalize_github_issue(
-            &sample_issue(),
-            &active_states(),
-            &terminal_states(),
-        )
-        .unwrap();
+        let issue =
+            normalize_github_issue(&sample_issue(), &active_states(), &terminal_states()).unwrap();
 
         assert_eq!(issue.blocked_by.len(), 2);
-        assert_eq!(
-            issue.blocked_by[0].identifier.as_deref(),
-            Some("#10")
-        );
-        assert_eq!(
-            issue.blocked_by[1].identifier.as_deref(),
-            Some("#20")
-        );
+        assert_eq!(issue.blocked_by[0].identifier.as_deref(), Some("#10"));
+        assert_eq!(issue.blocked_by[1].identifier.as_deref(), Some("#20"));
     }
 
     #[test]
@@ -267,12 +253,7 @@ mod tests {
             "updated_at": "2025-01-01T00:00:00Z"
         });
 
-        let issue = normalize_github_issue(
-            &raw,
-            &active_states(),
-            &terminal_states(),
-        )
-        .unwrap();
+        let issue = normalize_github_issue(&raw, &active_states(), &terminal_states()).unwrap();
 
         assert_eq!(issue.state, "Todo");
     }
@@ -291,12 +272,7 @@ mod tests {
             "updated_at": "2025-01-02T00:00:00Z"
         });
 
-        let issue = normalize_github_issue(
-            &raw,
-            &active_states(),
-            &terminal_states(),
-        )
-        .unwrap();
+        let issue = normalize_github_issue(&raw, &active_states(), &terminal_states()).unwrap();
 
         assert_eq!(issue.state, "Done");
     }
@@ -315,24 +291,15 @@ mod tests {
             "updated_at": "2025-01-02T00:00:00Z"
         });
 
-        let issue = normalize_github_issue(
-            &raw,
-            &active_states(),
-            &terminal_states(),
-        )
-        .unwrap();
+        let issue = normalize_github_issue(&raw, &active_states(), &terminal_states()).unwrap();
 
         assert_eq!(issue.state, "Cancelled");
     }
 
     #[test]
     fn parses_dates() {
-        let issue = normalize_github_issue(
-            &sample_issue(),
-            &active_states(),
-            &terminal_states(),
-        )
-        .unwrap();
+        let issue =
+            normalize_github_issue(&sample_issue(), &active_states(), &terminal_states()).unwrap();
 
         assert!(issue.created_at.is_some());
         assert!(issue.updated_at.is_some());
@@ -341,12 +308,7 @@ mod tests {
     #[test]
     fn missing_required_fields_returns_none() {
         let raw = json!({ "title": "No number" });
-        assert!(normalize_github_issue(
-            &raw,
-            &active_states(),
-            &terminal_states()
-        )
-        .is_none());
+        assert!(normalize_github_issue(&raw, &active_states(), &terminal_states()).is_none());
     }
 
     #[test]
@@ -363,12 +325,7 @@ mod tests {
             "updated_at": "2025-01-01T00:00:00Z"
         });
 
-        let issue = normalize_github_issue(
-            &raw,
-            &active_states(),
-            &terminal_states(),
-        )
-        .unwrap();
+        let issue = normalize_github_issue(&raw, &active_states(), &terminal_states()).unwrap();
 
         assert!(issue.priority.is_none());
     }

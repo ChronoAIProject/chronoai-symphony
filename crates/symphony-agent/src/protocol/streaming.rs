@@ -9,12 +9,15 @@ use std::time::Duration;
 use chrono::Utc;
 use serde_json::Value;
 use symphony_core::error::SymphonyError;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
 use crate::approval::{is_approval_request, is_tool_call, is_user_input_request};
 use crate::approval_handler::{ApprovalDecision, ApprovalHandler};
 use crate::process::AgentProcess;
+use crate::protocol::dynamic_tools::{
+    DynamicToolContext, execute as execute_dynamic_tool, supports_tool,
+};
 use crate::protocol::events::{AgentEvent, TokenUsage};
 
 /// The outcome of a completed turn streaming session.
@@ -34,11 +37,20 @@ pub async fn stream_turn(
     event_tx: &mpsc::Sender<AgentEvent>,
     turn_timeout: Duration,
     approval_handler: &dyn ApprovalHandler,
+    dynamic_tool_context: Option<&DynamicToolContext>,
+    cancel_rx: &mut watch::Receiver<bool>,
 ) -> Result<TurnResult, SymphonyError> {
     info!("streaming turn output");
 
     let result = tokio::time::timeout(turn_timeout, async {
-        stream_turn_inner(process, event_tx, approval_handler).await
+        stream_turn_inner(
+            process,
+            event_tx,
+            approval_handler,
+            dynamic_tool_context,
+            cancel_rx,
+        )
+        .await
     })
     .await;
 
@@ -61,6 +73,8 @@ async fn stream_turn_inner(
     process: &mut AgentProcess,
     event_tx: &mpsc::Sender<AgentEvent>,
     approval_handler: &dyn ApprovalHandler,
+    dynamic_tool_context: Option<&DynamicToolContext>,
+    cancel_rx: &mut watch::Receiver<bool>,
 ) -> Result<TurnResult, SymphonyError> {
     // Accumulator for agent message deltas. We collect all the word-by-word
     // delta fragments and emit a single notification when the message completes.
@@ -70,10 +84,26 @@ async fn stream_turn_inner(
     loop {
         // Use a 60-second read timeout so we can log a "still waiting" message
         // and check if the process is still alive during long reasoning phases.
-        let line = match tokio::time::timeout(
-            std::time::Duration::from_secs(60),
-            process.read_line(),
-        ).await {
+        let line = match tokio::select! {
+            changed = cancel_rx.changed() => {
+                match changed {
+                    Ok(()) if *cancel_rx.borrow() => {
+                        info!("turn cancelled by orchestrator");
+                        let _ = process.kill().await;
+                        let _ = event_tx
+                            .send(AgentEvent::TurnCancelled { timestamp: Utc::now() })
+                            .await;
+                        return Ok(TurnResult::Cancelled);
+                    }
+                    Ok(()) => continue,
+                    Err(_) => continue,
+                }
+            }
+            result = tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                process.read_line(),
+            ) => result,
+        } {
             Ok(result) => match result? {
                 Some(line) if line.is_empty() => continue,
                 Some(line) => {
@@ -94,7 +124,10 @@ async fn stream_turn_inner(
                         return Ok(TurnResult::ProcessExited);
                     }
                     Ok(None) => {
-                        info!(idle_secs, "agent still running, waiting for output (reasoning?)");
+                        info!(
+                            idle_secs,
+                            "agent still running, waiting for output (reasoning?)"
+                        );
                     }
                     Err(e) => {
                         warn!(error = %e, "failed to check agent process status");
@@ -123,10 +156,7 @@ async fn stream_turn_inner(
             }
         };
 
-        let method = parsed
-            .get("method")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let method = parsed.get("method").and_then(|v| v.as_str()).unwrap_or("");
         let params = parsed.get("params").cloned().unwrap_or(Value::Null);
 
         // Log message method at debug level (use RUST_LOG=debug to see).
@@ -177,7 +207,9 @@ async fn stream_turn_inner(
             "turn/cancelled" | "codex/turnCancelled" => {
                 info!("turn cancelled");
                 let _ = event_tx
-                    .send(AgentEvent::TurnCancelled { timestamp: Utc::now() })
+                    .send(AgentEvent::TurnCancelled {
+                        timestamp: Utc::now(),
+                    })
                     .await;
                 return Ok(TurnResult::Cancelled);
             }
@@ -199,11 +231,7 @@ async fn stream_turn_inner(
                 .await;
 
             let decision = approval_handler
-                .handle_approval(
-                    approval_id.clone(),
-                    method.to_string(),
-                    params.clone(),
-                )
+                .handle_approval(approval_id.clone(), method.to_string(), params.clone())
                 .await;
 
             match decision {
@@ -214,9 +242,7 @@ async fn stream_turn_inner(
                         "result": { "decision": decision_str }
                     });
                     let _ = process
-                        .write_message(
-                            &serde_json::to_string(&response).unwrap_or_default(),
-                        )
+                        .write_message(&serde_json::to_string(&response).unwrap_or_default())
                         .await;
                     let _ = event_tx
                         .send(AgentEvent::ApprovalAutoApproved {
@@ -231,9 +257,7 @@ async fn stream_turn_inner(
                         "result": { "decision": "deny" }
                     });
                     let _ = process
-                        .write_message(
-                            &serde_json::to_string(&response).unwrap_or_default(),
-                        )
+                        .write_message(&serde_json::to_string(&response).unwrap_or_default())
                         .await;
                 }
             }
@@ -249,28 +273,49 @@ async fn stream_turn_inner(
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
                 .to_string();
+            let arguments = extract_tool_arguments(&params);
 
-            // We don't support any dynamic tools yet - return failure.
-            warn!(tool_name = %tool_name, "unsupported tool call");
-            let response = serde_json::json!({
-                "id": parse_id_value(&request_id),
-                "result": {
-                    "success": false,
-                    "error": "unsupported_tool_call",
-                    "output": format!("Tool '{}' is not supported in this Symphony session.", tool_name),
-                    "contentItems": [{"type": "inputText", "text": format!("unsupported tool: {}", tool_name)}]
-                }
-            });
-            let _ = process
-                .write_message(&serde_json::to_string(&response).unwrap_or_default())
-                .await;
+            if supports_tool(&tool_name) {
+                let result = match dynamic_tool_context {
+                    Some(context) => execute_dynamic_tool(&tool_name, arguments, context).await,
+                    None => serde_json::json!({
+                        "success": false,
+                        "output": format!(
+                            "Tool '{}' is unavailable because Symphony did not provide a coordination context for this session.",
+                            tool_name
+                        ),
+                        "contentItems": [{"type": "inputText", "text": format!("unavailable tool: {}", tool_name)}]
+                    }),
+                };
+                let response = serde_json::json!({
+                    "id": parse_id_value(&request_id),
+                    "result": result
+                });
+                let _ = process
+                    .write_message(&serde_json::to_string(&response).unwrap_or_default())
+                    .await;
+            } else {
+                warn!(tool_name = %tool_name, "unsupported tool call");
+                let response = serde_json::json!({
+                    "id": parse_id_value(&request_id),
+                    "result": {
+                        "success": false,
+                        "error": "unsupported_tool_call",
+                        "output": format!("Tool '{}' is not supported in this Symphony session.", tool_name),
+                        "contentItems": [{"type": "inputText", "text": format!("unsupported tool: {}", tool_name)}]
+                    }
+                });
+                let _ = process
+                    .write_message(&serde_json::to_string(&response).unwrap_or_default())
+                    .await;
 
-            let _ = event_tx
-                .send(AgentEvent::UnsupportedToolCall {
-                    tool_name,
-                    timestamp: Utc::now(),
-                })
-                .await;
+                let _ = event_tx
+                    .send(AgentEvent::UnsupportedToolCall {
+                        tool_name,
+                        timestamp: Utc::now(),
+                    })
+                    .await;
+            }
             continue;
         }
 
@@ -278,7 +323,9 @@ async fn stream_turn_inner(
         if is_user_input_request(method, &params) {
             info!("agent requires user input");
             let _ = event_tx
-                .send(AgentEvent::TurnInputRequired { timestamp: Utc::now() })
+                .send(AgentEvent::TurnInputRequired {
+                    timestamp: Utc::now(),
+                })
                 .await;
             return Ok(TurnResult::InputRequired);
         }
@@ -397,23 +444,29 @@ async fn stream_turn_inner(
 /// This mirrors OpenAI's `maybe_set_usage` which checks every message
 /// payload for a `usage` map.
 fn extract_usage_from_message(msg: &Value) -> Option<TokenUsage> {
-    let usage = msg.get("usage").or_else(|| {
-        msg.get("params").and_then(|p| p.get("usage"))
-    })?;
+    let usage = msg
+        .get("usage")
+        .or_else(|| msg.get("params").and_then(|p| p.get("usage")))?;
 
     if !usage.is_object() {
         return None;
     }
 
     let input = usage
-        .get("inputTokens").or_else(|| usage.get("input_tokens"))
-        .and_then(|v| v.as_u64()).unwrap_or(0);
+        .get("inputTokens")
+        .or_else(|| usage.get("input_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     let output = usage
-        .get("outputTokens").or_else(|| usage.get("output_tokens"))
-        .and_then(|v| v.as_u64()).unwrap_or(0);
+        .get("outputTokens")
+        .or_else(|| usage.get("output_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     let total = usage
-        .get("totalTokens").or_else(|| usage.get("total_tokens"))
-        .and_then(|v| v.as_u64()).unwrap_or(input + output);
+        .get("totalTokens")
+        .or_else(|| usage.get("total_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(input + output);
 
     if input == 0 && output == 0 && total == 0 {
         return None;
@@ -427,25 +480,44 @@ fn extract_token_usage(params: &Value) -> Option<TokenUsage> {
     let usage = params.get("usage").or_else(|| params.get("tokenUsage"));
     match usage {
         Some(u) if u.is_object() => {
-            let input = u.get("inputTokens").or_else(|| u.get("input_tokens"))
-                .and_then(|v| v.as_u64()).unwrap_or(0);
-            let output = u.get("outputTokens").or_else(|| u.get("output_tokens"))
-                .and_then(|v| v.as_u64()).unwrap_or(0);
-            let total = u.get("totalTokens").or_else(|| u.get("total_tokens"))
-                .and_then(|v| v.as_u64()).unwrap_or(input + output);
+            let input = u
+                .get("inputTokens")
+                .or_else(|| u.get("input_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let output = u
+                .get("outputTokens")
+                .or_else(|| u.get("output_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let total = u
+                .get("totalTokens")
+                .or_else(|| u.get("total_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(input + output);
             Some(TokenUsage::new(input, output, total))
         }
         _ => {
             // Check for total_token_usage / totalTokenUsage
-            let total_usage = params.get("total_token_usage")
+            let total_usage = params
+                .get("total_token_usage")
                 .or_else(|| params.get("totalTokenUsage"));
             if let Some(tu) = total_usage {
-                let input = tu.get("input_tokens").or_else(|| tu.get("inputTokens"))
-                    .and_then(|v| v.as_u64()).unwrap_or(0);
-                let output = tu.get("output_tokens").or_else(|| tu.get("outputTokens"))
-                    .and_then(|v| v.as_u64()).unwrap_or(0);
-                let total = tu.get("total_tokens").or_else(|| tu.get("totalTokens"))
-                    .and_then(|v| v.as_u64()).unwrap_or(input + output);
+                let input = tu
+                    .get("input_tokens")
+                    .or_else(|| tu.get("inputTokens"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let output = tu
+                    .get("output_tokens")
+                    .or_else(|| tu.get("outputTokens"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let total = tu
+                    .get("total_tokens")
+                    .or_else(|| tu.get("totalTokens"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(input + output);
                 Some(TokenUsage::new(input, output, total))
             } else {
                 None
@@ -464,14 +536,20 @@ fn extract_token_usage_from_thread_update(params: &Value) -> Option<TokenUsage> 
     let totals = token_usage.get("total").unwrap_or(token_usage);
 
     let input = totals
-        .get("inputTokens").or_else(|| totals.get("input_tokens"))
-        .and_then(|v| v.as_u64()).unwrap_or(0);
+        .get("inputTokens")
+        .or_else(|| totals.get("input_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     let output = totals
-        .get("outputTokens").or_else(|| totals.get("output_tokens"))
-        .and_then(|v| v.as_u64()).unwrap_or(0);
+        .get("outputTokens")
+        .or_else(|| totals.get("output_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     let total = totals
-        .get("totalTokens").or_else(|| totals.get("total_tokens"))
-        .and_then(|v| v.as_u64()).unwrap_or(input + output);
+        .get("totalTokens")
+        .or_else(|| totals.get("total_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(input + output);
 
     if total == 0 && input == 0 && output == 0 {
         return None;
@@ -489,45 +567,55 @@ fn extract_token_usage_from_thread_update(params: &Value) -> Option<TokenUsage> 
 fn extract_event_text(method: &str, params: &Value) -> String {
     match method {
         // Agent message deltas contain the actual text the model is producing.
-        "item/agentMessage/delta" => {
-            params.get("delta")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string()
-        }
+        "item/agentMessage/delta" => params
+            .get("delta")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         // Item started/completed carry the item type.
         "item/started" | "item/completed" => {
-            let item_type = params.get("item")
+            let item_type = params
+                .get("item")
                 .and_then(|i| i.get("type"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            let label = if method.ends_with("started") { "started" } else { "completed" };
+            let label = if method.ends_with("started") {
+                "started"
+            } else {
+                "completed"
+            };
             // For command executions, include the command.
             if item_type == "commandExecution" || item_type == "command_execution" {
-                let cmd = params.get("item")
+                let cmd = params
+                    .get("item")
                     .and_then(|i| i.get("command"))
                     .and_then(|v| v.as_str())
-                    .or_else(|| params.get("item")
-                        .and_then(|i| i.get("args"))
-                        .and_then(|v| v.as_str()))
+                    .or_else(|| {
+                        params
+                            .get("item")
+                            .and_then(|i| i.get("args"))
+                            .and_then(|v| v.as_str())
+                    })
                     .unwrap_or("");
                 if cmd.is_empty() {
                     format!("{item_type} {label}")
                 } else {
-                    format!("{item_type} {label}: {}", cmd.chars().take(100).collect::<String>())
+                    format!(
+                        "{item_type} {label}: {}",
+                        cmd.chars().take(100).collect::<String>()
+                    )
                 }
             } else {
                 format!("{item_type} {label}")
             }
         }
         // Generic fallback.
-        _ => {
-            params.get("message")
-                .and_then(|v| v.as_str())
-                .or_else(|| params.get("text").and_then(|v| v.as_str()))
-                .unwrap_or("")
-                .to_string()
-        }
+        _ => params
+            .get("message")
+            .and_then(|v| v.as_str())
+            .or_else(|| params.get("text").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .to_string(),
     }
 }
 
@@ -551,6 +639,13 @@ fn parse_id_value(id: &str) -> Value {
     }
 }
 
+fn extract_tool_arguments(params: &Value) -> Value {
+    params
+        .get("arguments")
+        .or_else(|| params.get("input"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}))
+}
 
 #[cfg(test)]
 mod tests {
@@ -559,7 +654,8 @@ mod tests {
 
     #[test]
     fn extract_token_usage_camel_case() {
-        let params = json!({"usage": {"inputTokens": 100, "outputTokens": 200, "totalTokens": 300}});
+        let params =
+            json!({"usage": {"inputTokens": 100, "outputTokens": 200, "totalTokens": 300}});
         let usage = extract_token_usage(&params).unwrap();
         assert_eq!(usage.input_tokens, 100);
         assert_eq!(usage.output_tokens, 200);
@@ -568,7 +664,8 @@ mod tests {
 
     #[test]
     fn extract_token_usage_snake_case() {
-        let params = json!({"usage": {"input_tokens": 50, "output_tokens": 75, "total_tokens": 125}});
+        let params =
+            json!({"usage": {"input_tokens": 50, "output_tokens": 75, "total_tokens": 125}});
         let usage = extract_token_usage(&params).unwrap();
         assert_eq!(usage.input_tokens, 50);
         assert_eq!(usage.total_tokens, 125);
@@ -614,4 +711,18 @@ mod tests {
         assert_eq!(parse_id_value("abc"), Value::String("abc".into()));
     }
 
+    #[test]
+    fn extract_tool_arguments_prefers_arguments_payload() {
+        let params = json!({"arguments": {"target": ".symphony/coordination/shared.md"}});
+        assert_eq!(
+            extract_tool_arguments(&params),
+            json!({"target": ".symphony/coordination/shared.md"})
+        );
+    }
+
+    #[test]
+    fn extract_tool_arguments_falls_back_to_input() {
+        let params = json!({"input": {"action": "list"}});
+        assert_eq!(extract_tool_arguments(&params), json!({"action": "list"}));
+    }
 }

@@ -65,6 +65,10 @@ pub struct AgentProfileConfig {
     pub reasoning_effort: Option<String>,
     pub network_access: bool,
     pub max_turns: Option<u32>,
+    /// Claude Code-only tool allowlist passed via `--allowed-tools`.
+    pub allowed_tools: Vec<String>,
+    /// Claude Code-only tool denylist passed via `--disallowed-tools`.
+    pub disallowed_tools: Vec<String>,
 }
 
 /// A single stage in a customizable pipeline.
@@ -159,6 +163,16 @@ pub struct ServiceConfig {
     // -- pipeline stages (custom pipeline) --
     pub pipeline_stages: Vec<PipelineStage>,
 
+    // -- prompt overlays --
+    /// Optional state-specific prompt fragments appended after the main
+    /// prompt body. Useful when most rules are shared but a few instructions
+    /// vary by state (e.g. code-review vs rework).
+    pub prompt_state_instructions: HashMap<String, String>,
+    /// Optional role-specific prompt fragments appended after the shared
+    /// prompt body and state instructions when a matching pipeline role is
+    /// active (e.g. reviewer vs implementer).
+    pub prompt_role_instructions: HashMap<String, String>,
+
     // -- server --
     pub server_port: Option<u16>,
 }
@@ -167,9 +181,10 @@ impl ServiceConfig {
     /// Build a `ServiceConfig` from a parsed `WorkflowDefinition`, applying
     /// defaults and resolving environment variables.
     pub fn from_workflow(workflow: &WorkflowDefinition) -> Result<Self> {
-        let root = workflow.config.as_mapping().ok_or_else(|| {
-            SymphonyError::WorkflowFrontMatterNotAMap
-        })?;
+        let root = workflow
+            .config
+            .as_mapping()
+            .ok_or_else(|| SymphonyError::WorkflowFrontMatterNotAMap)?;
 
         let tracker = get_mapping(root, "tracker");
         let polling = get_mapping(root, "polling");
@@ -178,32 +193,32 @@ impl ServiceConfig {
         let hooks_map = get_mapping(root, "hooks");
         let agent = get_mapping(root, "agent");
         let codex = get_mapping(root, "codex");
+        let prompt = get_mapping(root, "prompt");
         let server = get_mapping(root, "server");
 
         // -- tracker --
-        let tracker_kind = get_str(&tracker, "kind")
-            .unwrap_or_else(|| "github".to_owned());
+        let tracker_kind = get_str(&tracker, "kind").unwrap_or_else(|| "github".to_owned());
 
         let default_endpoint = match tracker_kind.as_str() {
             "github" => "https://api.github.com",
             _ => "",
         };
-        let tracker_endpoint = get_str(&tracker, "endpoint")
-            .unwrap_or_else(|| default_endpoint.to_owned());
+        let tracker_endpoint =
+            get_str(&tracker, "endpoint").unwrap_or_else(|| default_endpoint.to_owned());
 
         let tracker_api_key = get_str(&tracker, "api_key")
             .map(|v| resolve_env_var(&v))
             .transpose()?
             .unwrap_or_default(); // Can be empty when using GitHub App auth
 
-        let tracker_project_slug = get_str(&tracker, "project_slug")
-            .ok_or(SymphonyError::MissingTrackerProjectSlug)?;
+        let tracker_project_slug =
+            get_str(&tracker, "project_slug").ok_or(SymphonyError::MissingTrackerProjectSlug)?;
 
         let tracker_active_states = get_string_list(&tracker, "active_states")
             .unwrap_or_else(|| vec!["Todo".to_owned(), "In Progress".to_owned()]);
 
-        let tracker_terminal_states = get_string_list(&tracker, "terminal_states")
-            .unwrap_or_else(|| {
+        let tracker_terminal_states =
+            get_string_list(&tracker, "terminal_states").unwrap_or_else(|| {
                 vec![
                     "Closed".to_owned(),
                     "Cancelled".to_owned(),
@@ -227,8 +242,7 @@ impl ServiceConfig {
             .transpose()?;
 
         // -- polling --
-        let polling_interval_ms = get_u64(&polling, "interval_ms")
-            .unwrap_or(30_000);
+        let polling_interval_ms = get_u64(&polling, "interval_ms").unwrap_or(30_000);
 
         // -- workspace --
         let workspace_root = get_str(&workspace, "root")
@@ -241,8 +255,7 @@ impl ServiceConfig {
             });
 
         // -- git --
-        let git_user_name = get_str(&git, "user_name")
-            .or_else(|| get_str(&git, "name"));
+        let git_user_name = get_str(&git, "user_name").or_else(|| get_str(&git, "name"));
         let git_user_email = get_str(&git, "email");
 
         // -- hooks --
@@ -256,11 +269,9 @@ impl ServiceConfig {
 
         // -- agent --
         let agent_require_label = get_str(&agent, "require_label");
-        let agent_max_concurrent = get_u32(&agent, "max_concurrent_agents")
-            .unwrap_or(10);
+        let agent_max_concurrent = get_u32(&agent, "max_concurrent_agents").unwrap_or(10);
         let agent_max_turns = get_u32(&agent, "max_turns").unwrap_or(20);
-        let agent_max_retry_backoff_ms = get_u64(&agent, "max_retry_backoff_ms")
-            .unwrap_or(300_000);
+        let agent_max_retry_backoff_ms = get_u64(&agent, "max_retry_backoff_ms").unwrap_or(300_000);
         let agent_max_concurrent_by_state =
             get_str_u32_map(&agent, "max_concurrent_agents_by_state");
         let codex_auto_merge = get_str(&agent, "auto_merge")
@@ -269,8 +280,7 @@ impl ServiceConfig {
             .unwrap_or(false);
 
         // -- agent profiles (multi-agent) --
-        let (agent_profiles, default_agent) =
-            parse_agent_profiles(root, &agent, &codex)?;
+        let (agent_profiles, default_agent) = parse_agent_profiles(root, &agent, &codex)?;
 
         // Parse agent_by_state: maps state names to agent profile names.
         let agent_by_state = get_value(&agent, "by_state")
@@ -306,6 +316,10 @@ impl ServiceConfig {
 
         // -- pipeline stages --
         let pipeline_stages = parse_pipeline_stages(root);
+
+        // -- prompt overlays --
+        let prompt_state_instructions = get_str_str_map(&prompt, "state_instructions");
+        let prompt_role_instructions = get_str_str_map(&prompt, "role_instructions");
 
         // -- server --
         let server_port = get_u64(&server, "port").map(|v| v as u16);
@@ -345,6 +359,8 @@ impl ServiceConfig {
             codex_network_access,
             codex_auto_merge,
             pipeline_stages,
+            prompt_state_instructions,
+            prompt_role_instructions,
             server_port,
         })
     }
@@ -380,9 +396,8 @@ impl ServiceConfig {
         if self.pipeline_stages.is_empty() {
             return vec![];
         }
-        let normalize = |s: &str| -> String {
-            s.to_lowercase().replace('-', " ").replace('_', " ")
-        };
+        let normalize =
+            |s: &str| -> String { s.to_lowercase().replace('-', " ").replace('_', " ") };
         let issue_state_norm = normalize(&issue.state);
 
         // Get all stages matching this state.
@@ -432,13 +447,12 @@ impl ServiceConfig {
         if self.pipeline_stages.is_empty() {
             return false;
         }
-        let normalize = |s: &str| -> String {
-            s.to_lowercase().replace('-', " ").replace('_', " ")
-        };
+        let normalize =
+            |s: &str| -> String { s.to_lowercase().replace('-', " ").replace('_', " ") };
         let normalized = normalize(state);
-        self.pipeline_stages.iter().any(|stage| {
-            normalize(&stage.state) == normalized && stage.agent == "none"
-        })
+        self.pipeline_stages
+            .iter()
+            .any(|stage| normalize(&stage.state) == normalized && stage.agent == "none")
     }
 
     /// Resolve which agent profile to use for a given issue.
@@ -460,9 +474,8 @@ impl ServiceConfig {
 
         // 1. Check state-based agent mapping.
         // Normalize both sides: lowercase, hyphens/underscores -> spaces.
-        let normalize = |s: &str| -> String {
-            s.to_lowercase().replace('-', " ").replace('_', " ")
-        };
+        let normalize =
+            |s: &str| -> String { s.to_lowercase().replace('-', " ").replace('_', " ") };
         let issue_state_norm = normalize(&issue.state);
         for (state_key, agent_name) in &self.agent_by_state {
             if normalize(state_key) == issue_state_norm {
@@ -485,6 +498,18 @@ impl ServiceConfig {
             .or_else(|| self.agent_profiles.values().next())
             .expect("at least one agent profile must be configured")
     }
+
+    /// Resolve an optional state-specific prompt overlay for the issue state.
+    pub fn state_instruction_for(&self, state: &str) -> Option<&String> {
+        let normalized = normalize_prompt_overlay_key(state);
+        self.prompt_state_instructions.get(&normalized)
+    }
+
+    /// Resolve an optional role-specific prompt overlay for the active stage role.
+    pub fn role_instruction_for(&self, role: Option<&str>) -> Option<&String> {
+        let normalized = normalize_prompt_overlay_key(role?);
+        self.prompt_role_instructions.get(&normalized)
+    }
 }
 
 /// Build a default `AgentProfileConfig` with standard Codex defaults.
@@ -502,6 +527,8 @@ fn default_agent_profile() -> AgentProfileConfig {
         reasoning_effort: None,
         network_access: true,
         max_turns: None,
+        allowed_tools: vec![],
+        disallowed_tools: vec![],
     }
 }
 
@@ -517,23 +544,21 @@ fn parse_profile_from_mapping(mapping: &Mapping) -> AgentProfileConfig {
 
     AgentProfileConfig {
         agent_type,
-        command: get_str(mapping, "command")
-            .unwrap_or_else(|| "codex app-server".to_owned()),
+        command: get_str(mapping, "command").unwrap_or_else(|| "codex app-server".to_owned()),
         approval_policy: get_str(mapping, "approval_policy"),
         thread_sandbox: get_str(mapping, "thread_sandbox"),
         turn_sandbox_policy: get_str(mapping, "turn_sandbox_policy"),
-        turn_timeout_ms: get_u64(mapping, "turn_timeout_ms")
-            .unwrap_or(3_600_000),
-        read_timeout_ms: get_u64(mapping, "read_timeout_ms")
-            .unwrap_or(30_000),
-        stall_timeout_ms: get_i64(mapping, "stall_timeout_ms")
-            .unwrap_or(300_000),
+        turn_timeout_ms: get_u64(mapping, "turn_timeout_ms").unwrap_or(3_600_000),
+        read_timeout_ms: get_u64(mapping, "read_timeout_ms").unwrap_or(30_000),
+        stall_timeout_ms: get_i64(mapping, "stall_timeout_ms").unwrap_or(300_000),
         model: get_str(mapping, "model"),
         reasoning_effort: get_str(mapping, "reasoning_effort"),
         network_access: get_str(mapping, "network_access")
             .map(|v| v.to_lowercase() != "false")
             .unwrap_or(true),
         max_turns: get_u32(mapping, "max_turns"),
+        allowed_tools: get_string_list(mapping, "allowed_tools").unwrap_or_default(),
+        disallowed_tools: get_string_list(mapping, "disallowed_tools").unwrap_or_default(),
     }
 }
 
@@ -554,23 +579,19 @@ fn parse_agent_profiles(
         for (key, value) in agents {
             if let Some(name) = key.as_str() {
                 let profile_map = value.as_mapping().cloned().unwrap_or_default();
-                profiles.insert(
-                    name.to_owned(),
-                    parse_profile_from_mapping(&profile_map),
-                );
+                profiles.insert(name.to_owned(), parse_profile_from_mapping(&profile_map));
             }
         }
         if profiles.is_empty() {
             profiles.insert("codex".to_owned(), default_agent_profile());
         }
-        let default_name = get_str(agent, "default")
-            .unwrap_or_else(|| {
-                profiles
-                    .keys()
-                    .next()
-                    .cloned()
-                    .unwrap_or_else(|| "codex".to_owned())
-            });
+        let default_name = get_str(agent, "default").unwrap_or_else(|| {
+            profiles
+                .keys()
+                .next()
+                .cloned()
+                .unwrap_or_else(|| "codex".to_owned())
+        });
         Ok((profiles, default_name))
     } else {
         // Legacy format: single `codex:` section becomes one profile.
@@ -608,14 +629,12 @@ fn parse_pipeline_stages(root: &Mapping) -> Vec<PipelineStage> {
                 let m = item.as_mapping()?;
                 Some(PipelineStage {
                     state: get_str(m, "state")?.to_lowercase(),
-                    agent: get_str(m, "agent")
-                        .unwrap_or_else(|| "codex".to_owned()),
+                    agent: get_str(m, "agent").unwrap_or_else(|| "codex".to_owned()),
                     role: get_str(m, "role"),
                     prompt: get_str(m, "prompt"),
                     transition_to: get_str(m, "transition_to"),
                     reject_to: get_str(m, "reject_to"),
-                    when_labels: get_string_list(m, "when_labels")
-                        .unwrap_or_default(),
+                    when_labels: get_string_list(m, "when_labels").unwrap_or_default(),
                     scope: get_str(m, "scope"),
                 })
             })
@@ -681,6 +700,27 @@ fn get_string_list(mapping: &Mapping, key: &str) -> Option<Vec<String>> {
     })
 }
 
+/// Extract a `HashMap<String, String>` from a YAML mapping, normalizing keys
+/// to lowercase and space-separated state names.
+fn get_str_str_map(mapping: &Mapping, key: &str) -> HashMap<String, String> {
+    let mut result = HashMap::new();
+    if let Some(inner) = get_value(mapping, key).and_then(|v| v.as_mapping()) {
+        for (k, v) in inner {
+            if let (Some(key_str), Some(value_str)) = (k.as_str(), v.as_str()) {
+                result.insert(normalize_prompt_overlay_key(key_str), value_str.to_string());
+            }
+        }
+    }
+    result
+}
+
+fn normalize_prompt_overlay_key(key: &str) -> String {
+    key.trim()
+        .to_lowercase()
+        .replace('-', " ")
+        .replace('_', " ")
+}
+
 /// Extract a `HashMap<String, u32>` from a YAML mapping, normalizing keys to
 /// lowercase.
 fn get_str_u32_map(mapping: &Mapping, key: &str) -> HashMap<String, u32> {
@@ -735,8 +775,8 @@ fn resolve_path(value: &str) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::workflow::WorkflowDefinition;
+    use super::*;
 
     fn make_workflow(yaml: &str) -> WorkflowDefinition {
         let config: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
@@ -822,9 +862,64 @@ agent:
             cfg.agent_max_concurrent_by_state.get("in progress"),
             Some(&3)
         );
+        assert_eq!(cfg.agent_max_concurrent_by_state.get("todo"), Some(&5));
+    }
+
+    #[test]
+    fn from_workflow_prompt_state_instructions_are_normalized() {
+        unsafe { env::set_var("TEST_API_KEY3B", "key") };
+        let wf = make_workflow(
+            r#"
+tracker:
+  kind: github
+  api_key: $TEST_API_KEY3B
+  project_slug: owner/repo
+prompt:
+  state_instructions:
+    Code-Review: |
+      Review only. Do not implement.
+    in_progress: |
+      Keep edits narrow and push once done.
+"#,
+        );
+        let cfg = ServiceConfig::from_workflow(&wf).unwrap();
         assert_eq!(
-            cfg.agent_max_concurrent_by_state.get("todo"),
-            Some(&5)
+            cfg.state_instruction_for("code review").map(String::as_str),
+            Some("Review only. Do not implement.\n")
+        );
+        assert_eq!(
+            cfg.state_instruction_for("in-progress").map(String::as_str),
+            Some("Keep edits narrow and push once done.\n")
+        );
+    }
+
+    #[test]
+    fn from_workflow_prompt_role_instructions_are_normalized() {
+        unsafe { env::set_var("TEST_API_KEY3C", "key") };
+        let wf = make_workflow(
+            r#"
+tracker:
+  kind: github
+  api_key: $TEST_API_KEY3C
+  project_slug: owner/repo
+prompt:
+  role_instructions:
+    Code-Reviewer: |
+      Review only. Do not author implementation changes.
+    backend_dev: |
+      Keep changes inside service crates unless blocked.
+"#,
+        );
+        let cfg = ServiceConfig::from_workflow(&wf).unwrap();
+        assert_eq!(
+            cfg.role_instruction_for(Some("code reviewer"))
+                .map(String::as_str),
+            Some("Review only. Do not author implementation changes.\n")
+        );
+        assert_eq!(
+            cfg.role_instruction_for(Some("backend-dev"))
+                .map(String::as_str),
+            Some("Keep changes inside service crates unless blocked.\n")
         );
     }
 
@@ -894,6 +989,11 @@ agents:
     model: claude-sonnet-4-6
     reasoning_effort: high
     network_access: false
+    allowed_tools:
+      - Read
+      - Bash(gh pr:*)
+    disallowed_tools:
+      - Edit
 agent:
   default: codex
 "#,
@@ -912,6 +1012,11 @@ agent:
         assert_eq!(claude.model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(claude.reasoning_effort.as_deref(), Some("high"));
         assert!(!claude.network_access);
+        assert_eq!(
+            claude.allowed_tools,
+            vec!["Read".to_string(), "Bash(gh pr:*)".to_string()]
+        );
+        assert_eq!(claude.disallowed_tools, vec!["Edit".to_string()]);
 
         // Backward-compat fields should come from the default profile.
         assert_eq!(cfg.codex_command, "codex app-server");
@@ -1089,10 +1194,7 @@ pipeline:
         assert_eq!(cfg.pipeline_stages[1].state, "code-review");
         assert_eq!(cfg.pipeline_stages[1].agent, "claude");
         assert_eq!(cfg.pipeline_stages[1].role.as_deref(), Some("reviewer"));
-        assert_eq!(
-            cfg.pipeline_stages[1].reject_to.as_deref(),
-            Some("rework")
-        );
+        assert_eq!(cfg.pipeline_stages[1].reject_to.as_deref(), Some("rework"));
 
         assert_eq!(cfg.pipeline_stages[2].state, "human-review");
         assert_eq!(cfg.pipeline_stages[2].agent, "none");
@@ -1300,10 +1402,7 @@ pipeline:
         let stages = cfg.resolve_stages_for_issue(&issue);
         assert_eq!(stages.len(), 2);
 
-        let roles: Vec<_> = stages
-            .iter()
-            .map(|s| s.role.as_deref().unwrap())
-            .collect();
+        let roles: Vec<_> = stages.iter().map(|s| s.role.as_deref().unwrap()).collect();
         assert!(roles.contains(&"backend-implementer"));
         assert!(roles.contains(&"frontend-implementer"));
     }
@@ -1392,7 +1491,10 @@ pipeline:
         // Issue only has one of the two required labels.
         let issue = make_test_issue("4", "In-Progress", vec!["backend"]);
         let stages = cfg.resolve_stages_for_issue(&issue);
-        assert!(stages.is_empty(), "should not match when not ALL labels present");
+        assert!(
+            stages.is_empty(),
+            "should not match when not ALL labels present"
+        );
     }
 
     #[test]

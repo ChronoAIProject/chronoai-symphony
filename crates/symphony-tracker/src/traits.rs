@@ -19,19 +19,13 @@ pub trait IssueTracker: Send + Sync {
     ///
     /// States are matched case-insensitively against the tracker's native
     /// state or label representation.
-    async fn fetch_issues_by_states(
-        &self,
-        states: &[String],
-    ) -> Result<Vec<Issue>, SymphonyError>;
+    async fn fetch_issues_by_states(&self, states: &[String]) -> Result<Vec<Issue>, SymphonyError>;
 
     /// Fetch current state information for issues identified by their IDs.
     ///
     /// Returns minimal `Issue` records with at least `id`, `identifier`, and
     /// `state` populated. Used for polling state changes on known issues.
-    async fn fetch_issue_states_by_ids(
-        &self,
-        ids: &[String],
-    ) -> Result<Vec<Issue>, SymphonyError>;
+    async fn fetch_issue_states_by_ids(&self, ids: &[String]) -> Result<Vec<Issue>, SymphonyError>;
 
     /// Update labels on an issue. Adds and removes labels in a single operation.
     /// Used by the orchestrator to auto-transition pipeline states.

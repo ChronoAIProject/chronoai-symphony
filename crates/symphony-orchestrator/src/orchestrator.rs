@@ -12,8 +12,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use symphony_agent::protocol::events::AgentEvent;
 use symphony_core::domain::{
-    CodexTotals, Issue, OrchestratorState, PipelineStage, RunningEntry,
-    ServiceConfig,
+    CodexTotals, Issue, OrchestratorState, PipelineStage, RunningEntry, ServiceConfig,
 };
 use symphony_tracker::traits::IssueTracker;
 use symphony_workspace::manager::WorkspaceManager;
@@ -25,7 +24,7 @@ use crate::approval_queue::PendingApprovalQueue;
 use crate::cleanup::startup_terminal_cleanup;
 use crate::dispatch::{is_dispatch_eligible, sort_for_dispatch};
 use crate::events::{OrchestratorEvent, WorkerExitReason};
-use crate::reconciliation::{reconcile_running_issues, ReconciliationAction};
+use crate::reconciliation::{ReconciliationAction, reconcile_running_issues};
 use crate::retry::compute_backoff_ms;
 use crate::worker::run_worker;
 
@@ -56,6 +55,13 @@ pub struct RunningIssueSummary {
 /// Shared with the HTTP server so the dashboard can display live state.
 pub type SharedSnapshot = Arc<RwLock<serde_json::Value>>;
 
+#[derive(Debug, Clone)]
+enum TerminationRequest {
+    CompleteAndCleanup,
+    StopNoCleanup,
+    Retry { error: String },
+}
+
 /// The main orchestrator that coordinates all agent activity.
 pub struct Orchestrator {
     state: OrchestratorState,
@@ -69,6 +75,7 @@ pub struct Orchestrator {
     approval_queue: Arc<PendingApprovalQueue>,
     activity_log: Arc<ActivityLog>,
     cancel_senders: HashMap<String, tokio::sync::watch::Sender<bool>>,
+    termination_requests: HashMap<String, TerminationRequest>,
 }
 
 impl Orchestrator {
@@ -115,6 +122,7 @@ impl Orchestrator {
             approval_queue,
             activity_log,
             cancel_senders: HashMap::new(),
+            termination_requests: HashMap::new(),
         }
     }
 
@@ -193,8 +201,7 @@ impl Orchestrator {
         });
 
         // Channel for worker events tagged with issue ID.
-        let (worker_event_tx, mut worker_event_rx) =
-            mpsc::channel::<(String, AgentEvent)>(256);
+        let (worker_event_tx, mut worker_event_rx) = mpsc::channel::<(String, AgentEvent)>(256);
 
         // Forward worker events into the orchestrator event loop.
         let codex_update_tx = self.event_tx.clone();
@@ -215,14 +222,13 @@ impl Orchestrator {
                     self.handle_tick(&worker_event_tx).await;
                 }
                 OrchestratorEvent::WorkerExited { issue_id, reason } => {
-                    self.handle_worker_exited(&issue_id, reason);
+                    self.handle_worker_exited(&issue_id, reason).await;
                 }
                 OrchestratorEvent::CodexUpdate { issue_id, event } => {
                     self.handle_codex_update(&issue_id, event);
                 }
                 OrchestratorEvent::RetryTimerFired { issue_id } => {
-                    self.handle_retry_timer(&issue_id, &worker_event_tx)
-                        .await;
+                    self.handle_retry_timer(&issue_id, &worker_event_tx).await;
                 }
                 OrchestratorEvent::WorkflowReloaded {
                     config,
@@ -247,10 +253,7 @@ impl Orchestrator {
     }
 
     /// Handle a periodic tick: reconcile, fetch candidates, dispatch.
-    async fn handle_tick(
-        &mut self,
-        worker_event_tx: &mpsc::Sender<(String, AgentEvent)>,
-    ) {
+    async fn handle_tick(&mut self, worker_event_tx: &mpsc::Sender<(String, AgentEvent)>) {
         // Reconcile running issues.
         let actions = reconcile_running_issues(
             &self.state,
@@ -265,11 +268,7 @@ impl Orchestrator {
         }
 
         // Fetch candidate issues from tracker.
-        let candidates: Vec<Issue> = match self
-            .tracker
-            .fetch_candidate_issues()
-            .await
-        {
+        let candidates: Vec<Issue> = match self.tracker.fetch_candidate_issues().await {
             Ok(issues) => issues,
             Err(e) => {
                 warn!(error = %e, "failed to fetch issues from tracker");
@@ -327,8 +326,7 @@ impl Orchestrator {
                     let compound_key = format!("{}:{}", issue.id, role);
 
                     let already_running = self.state.running.values().any(|entry| {
-                        entry.issue.id == issue.id
-                            && entry.stage_role.as_deref() == Some(role)
+                        entry.issue.id == issue.id && entry.stage_role.as_deref() == Some(role)
                     });
                     if already_running {
                         continue;
@@ -349,41 +347,106 @@ impl Orchestrator {
                     if self.state.running.len() as u32 >= self.state.max_concurrent_agents {
                         break;
                     }
-                    self.dispatch_issue_with_stage(
-                        issue.clone(),
-                        None,
-                        worker_event_tx,
-                        stage,
-                    )
-                    .await;
+                    self.dispatch_issue_with_stage(issue.clone(), None, worker_event_tx, stage)
+                        .await;
                 }
             }
         }
+    }
+
+    fn schedule_retry(
+        &mut self,
+        issue_id: &str,
+        identifier: String,
+        current_attempt: u32,
+        error: String,
+    ) {
+        let max_retries = 3u32; // Could be made configurable.
+        if current_attempt >= max_retries {
+            warn!(
+                issue_id = %issue_id,
+                attempt = current_attempt,
+                max_retries,
+                "max retries reached, giving up"
+            );
+            self.state.completed.insert(issue_id.to_string());
+            return;
+        }
+
+        let next_attempt = current_attempt + 1;
+        let max_backoff = self.config.agent_max_retry_backoff_ms;
+        let delay_ms = compute_backoff_ms(next_attempt, max_backoff);
+
+        info!(
+            issue_id = %issue_id,
+            attempt = next_attempt,
+            delay_ms,
+            "scheduling retry"
+        );
+
+        self.state.retry_attempts.insert(
+            issue_id.to_string(),
+            symphony_core::domain::RetryEntry {
+                issue_id: issue_id.to_string(),
+                identifier,
+                attempt: next_attempt,
+                due_at_ms: delay_ms,
+                error: Some(error),
+            },
+        );
+
+        let retry_tx = self.event_tx.clone();
+        let retry_issue_id = issue_id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            let _ = retry_tx
+                .send(OrchestratorEvent::RetryTimerFired {
+                    issue_id: retry_issue_id,
+                })
+                .await;
+        });
+    }
+
+    fn request_worker_termination(&mut self, issue_id: &str, request: TerminationRequest) -> bool {
+        let Some(entry) = self.state.running.get_mut(issue_id) else {
+            return false;
+        };
+
+        if entry.stop_requested_at.is_some() {
+            return false;
+        }
+
+        entry.stop_requested_at = Some(Utc::now());
+        self.termination_requests
+            .insert(issue_id.to_string(), request);
+
+        if let Some(cancel_tx) = self.cancel_senders.get(issue_id) {
+            let _ = cancel_tx.send(true);
+        }
+
+        true
     }
 
     /// Apply a single reconciliation action.
     async fn apply_reconciliation_action(&mut self, action: ReconciliationAction) {
         match action {
             ReconciliationAction::TerminateAndCleanup { issue_id } => {
-                info!(issue_id = %issue_id, "reconciliation: terminate and cleanup");
-                if let Some(entry) = self.state.running.remove(&issue_id) {
-                    self.state.completed.insert(issue_id.clone());
-                    if let Err(e) = self
-                        .workspace_manager
-                        .cleanup_workspace(&entry.identifier)
-                        .await
-                    {
-                        warn!(
-                            issue_id = %issue_id,
-                            error = %e,
-                            "failed to cleanup workspace during reconciliation"
-                        );
-                    }
+                if self
+                    .request_worker_termination(&issue_id, TerminationRequest::CompleteAndCleanup)
+                {
+                    info!(
+                        issue_id = %issue_id,
+                        "reconciliation: terminate and cleanup requested"
+                    );
                 }
             }
             ReconciliationAction::TerminateNoCleanup { issue_id } => {
-                info!(issue_id = %issue_id, "reconciliation: terminate without cleanup");
-                self.state.running.remove(&issue_id);
+                if self.request_worker_termination(&issue_id, TerminationRequest::StopNoCleanup) {
+                    info!(
+                        issue_id = %issue_id,
+                        "reconciliation: terminate without cleanup requested"
+                    );
+                }
             }
             ReconciliationAction::UpdateSnapshot {
                 issue_id,
@@ -394,52 +457,16 @@ impl Orchestrator {
                 }
             }
             ReconciliationAction::StallDetected { issue_id } => {
-                warn!(issue_id = %issue_id, "stall detected, cancelling worker and scheduling retry");
-
-                // Signal the worker to kill the agent process and exit.
-                if let Some(cancel_tx) = self.cancel_senders.remove(&issue_id) {
-                    let _ = cancel_tx.send(true);
-                }
-
-                // Treat stall like an abnormal exit: schedule a retry.
-                if let Some(entry) = self.state.running.remove(&issue_id) {
-                    self.state.claimed.remove(&issue_id);
-                    self.approval_queue.remove_by_issue(&issue_id);
-                    // Don't clear activity log so the UI preserves history.
-
-                    let current_attempt = entry.retry_attempt.unwrap_or(0);
-                    let next_attempt = current_attempt + 1;
-                    let max_backoff = self.config.agent_max_retry_backoff_ms;
-                    let delay_ms = compute_backoff_ms(next_attempt, max_backoff);
-
-                    info!(
+                if self.request_worker_termination(
+                    &issue_id,
+                    TerminationRequest::Retry {
+                        error: "stall detected: no output within timeout".to_string(),
+                    },
+                ) {
+                    warn!(
                         issue_id = %issue_id,
-                        attempt = next_attempt,
-                        delay_ms,
-                        "scheduling stall retry"
+                        "stall detected, cancelling worker before retry"
                     );
-
-                    self.state.retry_attempts.insert(
-                        issue_id.clone(),
-                        symphony_core::domain::RetryEntry {
-                            issue_id: issue_id.clone(),
-                            identifier: entry.identifier,
-                            attempt: next_attempt,
-                            due_at_ms: delay_ms,
-                            error: Some("stall detected: no output within timeout".to_string()),
-                        },
-                    );
-
-                    let retry_tx = self.event_tx.clone();
-                    let retry_issue_id = issue_id.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                        let _ = retry_tx
-                            .send(OrchestratorEvent::RetryTimerFired {
-                                issue_id: retry_issue_id,
-                            })
-                            .await;
-                    });
                 }
             }
         }
@@ -465,6 +492,7 @@ impl Orchestrator {
             .resolve_agent_for_issue(&issue)
             .agent_type
             .to_string();
+        let profile = self.config.resolve_agent_for_issue(&issue);
 
         // Add to running map.
         self.state.running.insert(
@@ -473,11 +501,13 @@ impl Orchestrator {
                 identifier: issue.identifier.clone(),
                 issue: issue.clone(),
                 agent_type: agent_type_str,
+                stall_timeout_ms: profile.stall_timeout_ms,
                 session_id: None,
                 codex_app_server_pid: None,
                 last_codex_message: None,
                 last_codex_event: None,
                 last_codex_timestamp: None,
+                stop_requested_at: None,
                 codex_input_tokens: 0,
                 codex_output_tokens: 0,
                 codex_total_tokens: 0,
@@ -542,11 +572,7 @@ impl Orchestrator {
         worker_event_tx: &mpsc::Sender<(String, AgentEvent)>,
         stage: &PipelineStage,
     ) {
-        let role = stage
-            .role
-            .as_deref()
-            .unwrap_or(&stage.agent)
-            .to_owned();
+        let role = stage.role.as_deref().unwrap_or(&stage.agent).to_owned();
         // Use "issue_id:role" as the running map key to support parallel stages.
         let running_key = format!("{}:{}", issue.id, role);
         let issue_id = issue.id.clone();
@@ -559,16 +585,11 @@ impl Orchestrator {
         );
 
         // Resolve agent type from the stage's agent profile.
-        let agent_type_str = self
+        let profile = self
             .config
             .get_agent_profile(&stage.agent)
-            .map(|p| p.agent_type.to_string())
-            .unwrap_or_else(|| {
-                self.config
-                    .resolve_agent_for_issue(&issue)
-                    .agent_type
-                    .to_string()
-            });
+            .unwrap_or_else(|| self.config.resolve_agent_for_issue(&issue));
+        let agent_type_str = profile.agent_type.to_string();
 
         // Add to running map with compound key.
         self.state.running.insert(
@@ -577,11 +598,13 @@ impl Orchestrator {
                 identifier: issue.identifier.clone(),
                 issue: issue.clone(),
                 agent_type: agent_type_str,
+                stall_timeout_ms: profile.stall_timeout_ms,
                 session_id: None,
                 codex_app_server_pid: None,
                 last_codex_message: None,
                 last_codex_event: None,
                 last_codex_timestamp: None,
+                stop_requested_at: None,
                 codex_input_tokens: 0,
                 codex_output_tokens: 0,
                 codex_total_tokens: 0,
@@ -641,7 +664,7 @@ impl Orchestrator {
     ///
     /// The `issue_id` may be a compound key `"issue_id:role"` for pipeline
     /// stages. The raw issue ID is extracted for the claimed set.
-    fn handle_worker_exited(&mut self, issue_id: &str, reason: WorkerExitReason) {
+    async fn handle_worker_exited(&mut self, issue_id: &str, reason: WorkerExitReason) {
         info!(
             issue_id = %issue_id,
             reason = ?reason,
@@ -649,13 +672,11 @@ impl Orchestrator {
         );
 
         // Extract the raw issue ID from a potential compound key "id:role".
-        let raw_issue_id = issue_id
-            .split(':')
-            .next()
-            .unwrap_or(issue_id);
+        let (raw_issue_id, _) = split_issue_key(issue_id);
 
         // Clean up cancellation sender.
         self.cancel_senders.remove(issue_id);
+        let termination_request = self.termination_requests.remove(issue_id);
 
         // Persist the running entry's full token counts into the
         // cumulative totals. The snapshot adds running entries' tokens
@@ -666,16 +687,17 @@ impl Orchestrator {
             self.state.codex_totals.output_tokens += entry.codex_output_tokens;
             self.state.codex_totals.total_tokens += entry.codex_total_tokens;
 
-            let elapsed = (Utc::now() - entry.started_at)
-                .num_milliseconds()
-                .max(0) as f64
-                / 1000.0;
+            let elapsed = (Utc::now() - entry.started_at).num_milliseconds().max(0) as f64 / 1000.0;
             self.state.codex_totals.seconds_running += elapsed;
         }
 
         // Clean up approval queue and activity log for this issue.
         self.approval_queue.remove_by_issue(issue_id);
-        self.activity_log.remove_issue(issue_id);
+        let preserve_activity =
+            matches!(termination_request, Some(TerminationRequest::Retry { .. }));
+        if !preserve_activity {
+            self.activity_log.remove_issue(issue_id);
+        }
 
         let entry = self.state.running.remove(issue_id);
         // Only remove from claimed if no other stages are still running for
@@ -687,6 +709,46 @@ impl Orchestrator {
             .any(|e| e.issue.id == raw_issue_id);
         if !other_stages_running {
             self.state.claimed.remove(raw_issue_id);
+        }
+
+        if let Some(request) = termination_request {
+            match request {
+                TerminationRequest::CompleteAndCleanup => {
+                    info!(
+                        issue_id = %issue_id,
+                        "worker exited after reconciliation cleanup request"
+                    );
+                    self.state.completed.insert(issue_id.to_string());
+                    if let Some(entry_ref) = entry.as_ref() {
+                        if let Err(e) = self
+                            .workspace_manager
+                            .cleanup_workspace(&entry_ref.identifier)
+                            .await
+                        {
+                            warn!(
+                                issue_id = %issue_id,
+                                error = %e,
+                                "failed to cleanup workspace after termination"
+                            );
+                        }
+                    }
+                }
+                TerminationRequest::StopNoCleanup => {
+                    info!(
+                        issue_id = %issue_id,
+                        "worker exited after reconciliation stop request"
+                    );
+                }
+                TerminationRequest::Retry { error } => {
+                    let current_attempt = entry.as_ref().and_then(|e| e.retry_attempt).unwrap_or(0);
+                    let identifier = entry
+                        .as_ref()
+                        .map(|e| e.identifier.clone())
+                        .unwrap_or_else(|| issue_id.to_string());
+                    self.schedule_retry(issue_id, identifier, current_attempt, error);
+                }
+            }
+            return;
         }
 
         match reason {
@@ -703,7 +765,8 @@ impl Orchestrator {
                     if let Some(ref entry_ref) = entry {
                         let stages = self.config.resolve_stages_for_issue(&entry_ref.issue);
                         // Find a matching stage that has transition_to but NO reject_to
-                        let transition = stages.iter()
+                        let transition = stages
+                            .iter()
                             .find(|s| s.agent != "none" && s.reject_to.is_none())
                             .and_then(|s| s.transition_to.as_ref());
                         if let Some(next_state) = transition {
@@ -728,9 +791,9 @@ impl Orchestrator {
                             // Clear completed entries for this issue so stages
                             // in the new state can be dispatched fresh.
                             let prefix = format!("{}:", raw_issue_id);
-                            self.state.completed.retain(|k| {
-                                !k.starts_with(&prefix) && k != raw_issue_id
-                            });
+                            self.state
+                                .completed
+                                .retain(|k| !k.starts_with(&prefix) && k != raw_issue_id);
 
                             info!(
                                 issue_id = %raw_issue_id,
@@ -742,7 +805,9 @@ impl Orchestrator {
                             let id = raw_issue_id.to_string();
                             let add = vec![next_lower.clone()];
                             tokio::spawn(async move {
-                                if let Err(e) = tracker.update_issue_labels(&id, &add, &remove).await {
+                                if let Err(e) =
+                                    tracker.update_issue_labels(&id, &add, &remove).await
+                                {
                                     warn!(error = %e, "failed to auto-transition issue labels");
                                 }
                             });
@@ -751,59 +816,12 @@ impl Orchestrator {
                 }
             }
             WorkerExitReason::Abnormal(ref err_msg) => {
-                let max_retries = 3u32; // Could be made configurable.
-                let current_attempt = entry
+                let current_attempt = entry.as_ref().and_then(|e| e.retry_attempt).unwrap_or(0);
+                let identifier = entry
                     .as_ref()
-                    .and_then(|e| e.retry_attempt)
-                    .unwrap_or(0);
-
-                if current_attempt < max_retries {
-                    let next_attempt = current_attempt + 1;
-                    let max_backoff = self.config.agent_max_retry_backoff_ms;
-                    let delay_ms = compute_backoff_ms(next_attempt, max_backoff);
-
-                    info!(
-                        issue_id = %issue_id,
-                        attempt = next_attempt,
-                        delay_ms,
-                        "scheduling retry"
-                    );
-
-                    // Store retry entry.
-                    let identifier = entry
-                        .map(|e| e.identifier)
-                        .unwrap_or_else(|| issue_id.to_string());
-                    self.state.retry_attempts.insert(
-                        issue_id.to_string(),
-                        symphony_core::domain::RetryEntry {
-                            issue_id: issue_id.to_string(),
-                            identifier,
-                            attempt: next_attempt,
-                            due_at_ms: delay_ms,
-                            error: Some(err_msg.clone()),
-                        },
-                    );
-
-                    // Spawn a timer to fire the retry event.
-                    let retry_tx = self.event_tx.clone();
-                    let retry_issue_id = issue_id.to_string();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                        let _ = retry_tx
-                            .send(OrchestratorEvent::RetryTimerFired {
-                                issue_id: retry_issue_id,
-                            })
-                            .await;
-                    });
-                } else {
-                    warn!(
-                        issue_id = %issue_id,
-                        attempt = current_attempt,
-                        max_retries,
-                        "max retries reached, giving up"
-                    );
-                    self.state.completed.insert(issue_id.to_string());
-                }
+                    .map(|e| e.identifier.clone())
+                    .unwrap_or_else(|| issue_id.to_string());
+                self.schedule_retry(issue_id, identifier, current_attempt, err_msg.clone());
             }
         }
     }
@@ -845,6 +863,17 @@ impl Orchestrator {
                 message: message.clone(),
                 timestamp: now_str.clone(),
             }),
+            AgentEvent::CoordinationActivity {
+                action,
+                role,
+                target,
+                detail,
+                ..
+            } => Some(ActivityEntry {
+                event_type: "coordination".to_string(),
+                message: Self::format_coordination_activity(action, role, target, detail),
+                timestamp: now_str.clone(),
+            }),
             _ => None,
         };
 
@@ -884,9 +913,20 @@ impl Orchestrator {
                     entry.last_codex_message = Some(message.clone());
                     entry.last_codex_event = Some("notification".to_string());
                 }
+                AgentEvent::CoordinationActivity {
+                    action,
+                    role,
+                    target,
+                    detail,
+                    ..
+                } => {
+                    entry.last_codex_message = Some(Self::format_coordination_activity(
+                        action, role, target, detail,
+                    ));
+                    entry.last_codex_event = Some("coordination".to_string());
+                }
                 AgentEvent::ApprovalRequested { .. } => {
-                    entry.last_codex_event =
-                        Some("approval_requested".to_string());
+                    entry.last_codex_event = Some("approval_requested".to_string());
                 }
                 AgentEvent::ApprovalAutoApproved { .. } => {
                     entry.last_codex_event = Some("auto_approved".to_string());
@@ -898,12 +938,36 @@ impl Orchestrator {
         }
     }
 
+    fn format_coordination_activity(
+        action: &str,
+        role: &Option<String>,
+        target: &Option<String>,
+        detail: &Option<String>,
+    ) -> String {
+        let mut parts = Vec::new();
+        if let Some(role) = role {
+            parts.push(format!("role={role}"));
+        }
+        if let Some(target) = target {
+            parts.push(format!("target={target}"));
+        }
+        if let Some(detail) = detail {
+            parts.push(detail.clone());
+        }
+        if parts.is_empty() {
+            action.to_string()
+        } else {
+            format!("{action}: {}", parts.join(" | "))
+        }
+    }
+
     /// Handle a retry timer firing.
     async fn handle_retry_timer(
         &mut self,
         issue_id: &str,
         worker_event_tx: &mpsc::Sender<(String, AgentEvent)>,
     ) {
+        let (raw_issue_id, retry_stage_role) = split_issue_key(issue_id);
         let retry_entry = match self.state.retry_attempts.remove(issue_id) {
             Some(entry) => entry,
             None => {
@@ -924,18 +988,42 @@ impl Orchestrator {
         // Fetch current issue state to check eligibility.
         match self
             .tracker
-            .fetch_issue_states_by_ids(&[issue_id.to_string()])
+            .fetch_issue_states_by_ids(&[raw_issue_id.to_string()])
             .await
         {
             Ok(issues) => {
                 if let Some(issue) = issues.into_iter().next() {
                     if is_dispatch_eligible(&issue, &self.state, &self.config) {
-                        self.dispatch_issue(
-                            issue,
-                            Some(retry_entry.attempt),
-                            worker_event_tx,
-                        )
-                        .await;
+                        if let Some(role) = retry_stage_role {
+                            let stage = self
+                                .config
+                                .resolve_stages_for_issue(&issue)
+                                .into_iter()
+                                .find(|stage| {
+                                    stage.agent != "none"
+                                        && stage.role.as_deref().unwrap_or(&stage.agent) == role
+                                })
+                                .cloned();
+
+                            if let Some(stage) = stage {
+                                self.dispatch_issue_with_stage(
+                                    issue,
+                                    Some(retry_entry.attempt),
+                                    worker_event_tx,
+                                    &stage,
+                                )
+                                .await;
+                            } else {
+                                info!(
+                                    issue_id = %issue_id,
+                                    role = %role,
+                                    "retry stage no longer matches current workflow state"
+                                );
+                            }
+                        } else {
+                            self.dispatch_issue(issue, Some(retry_entry.attempt), worker_event_tx)
+                                .await;
+                        }
                     } else {
                         info!(
                             issue_id = %issue_id,
@@ -957,11 +1045,7 @@ impl Orchestrator {
     }
 
     /// Handle a workflow configuration reload.
-    fn handle_workflow_reloaded(
-        &mut self,
-        config: ServiceConfig,
-        prompt_template: String,
-    ) {
+    fn handle_workflow_reloaded(&mut self, config: ServiceConfig, prompt_template: String) {
         info!("workflow reloaded, updating configuration");
         self.state.poll_interval_ms = config.polling_interval_ms;
         self.state.max_concurrent_agents = config.agent_max_concurrent;
@@ -1096,6 +1180,11 @@ impl Orchestrator {
                 );
             }
         }
+        for (issue_id, cancel_tx) in &self.cancel_senders {
+            if cancel_tx.send(true).is_err() {
+                debug!(issue_id = %issue_id, "worker already dropped before shutdown");
+            }
+        }
         info!("orchestrator shutdown complete");
     }
 }
@@ -1112,6 +1201,13 @@ fn update_token_counts(
     entry.codex_input_tokens = usage.input_tokens;
     entry.codex_output_tokens = usage.output_tokens;
     entry.codex_total_tokens = usage.total_tokens;
+}
+
+fn split_issue_key(issue_id: &str) -> (&str, Option<&str>) {
+    match issue_id.split_once(':') {
+        Some((raw_issue_id, stage_role)) => (raw_issue_id, Some(stage_role)),
+        None => (issue_id, None),
+    }
 }
 
 #[cfg(test)]
@@ -1160,6 +1256,8 @@ mod tests {
             reasoning_effort: None,
             network_access: true,
             max_turns: None,
+            allowed_tools: vec![],
+            disallowed_tools: vec![],
         };
         let mut agent_profiles = HashMap::new();
         agent_profiles.insert("codex".to_string(), default_profile);
@@ -1206,6 +1304,8 @@ mod tests {
             codex_network_access: true,
             codex_auto_merge: false,
             pipeline_stages: vec![],
+            prompt_state_instructions: HashMap::new(),
+            prompt_role_instructions: HashMap::new(),
         }
     }
 
@@ -1214,21 +1314,9 @@ mod tests {
         let config = test_config();
         let tracker: Arc<dyn IssueTracker> = Arc::new(NoopTracker);
         let tmp = tempfile::TempDir::new().unwrap();
-        let wm = WorkspaceManager::new(
-            tmp.path().to_path_buf(),
-            None,
-            None,
-            None,
-            None,
-            5000,
-        );
+        let wm = WorkspaceManager::new(tmp.path().to_path_buf(), None, None, None, None, 5000);
 
-        let orch = Orchestrator::new(
-            config,
-            "prompt".to_string(),
-            tracker,
-            Arc::new(wm),
-        );
+        let orch = Orchestrator::new(config, "prompt".to_string(), tracker, Arc::new(wm));
 
         let snap = orch.get_snapshot();
         assert_eq!(snap.running_count, 0);
@@ -1241,23 +1329,20 @@ mod tests {
         let config = test_config();
         let tracker: Arc<dyn IssueTracker> = Arc::new(NoopTracker);
         let tmp = tempfile::TempDir::new().unwrap();
-        let wm = WorkspaceManager::new(
-            tmp.path().to_path_buf(),
-            None,
-            None,
-            None,
-            None,
-            5000,
-        );
+        let wm = WorkspaceManager::new(tmp.path().to_path_buf(), None, None, None, None, 5000);
 
-        let orch = Orchestrator::new(
-            config,
-            "prompt".to_string(),
-            tracker,
-            Arc::new(wm),
-        );
+        let orch = Orchestrator::new(config, "prompt".to_string(), tracker, Arc::new(wm));
 
         let _tx1 = orch.event_sender();
         let _tx2 = orch.event_sender();
+    }
+
+    #[test]
+    fn split_issue_key_preserves_stage_role() {
+        assert_eq!(split_issue_key("123"), ("123", None));
+        assert_eq!(
+            split_issue_key("123:backend-implementer"),
+            ("123", Some("backend-implementer"))
+        );
     }
 }

@@ -50,19 +50,20 @@ pub fn render_prompt(
 
     let parser = build_strict_parser()?;
 
-    let compiled = parser.parse(effective_template).map_err(|e| {
-        SymphonyError::TemplateRenderError {
-            detail: format!("template parse error: {e}"),
-        }
-    })?;
+    let compiled =
+        parser
+            .parse(effective_template)
+            .map_err(|e| SymphonyError::TemplateRenderError {
+                detail: format!("template parse error: {e}"),
+            })?;
 
     let globals = build_globals(issue, attempt)?;
 
-    let rendered = compiled.render(&globals).map_err(|e| {
-        SymphonyError::TemplateRenderError {
+    let rendered = compiled
+        .render(&globals)
+        .map_err(|e| SymphonyError::TemplateRenderError {
             detail: format!("template render error: {e}"),
-        }
-    })?;
+        })?;
 
     Ok(rendered)
 }
@@ -101,29 +102,21 @@ pub fn render_prompt_with_stage(
 
     let parser = build_strict_parser()?;
 
-    let compiled = parser.parse(effective_template).map_err(|e| {
-        SymphonyError::TemplateRenderError {
-            detail: format!("template parse error: {e}"),
-        }
-    })?;
+    let compiled =
+        parser
+            .parse(effective_template)
+            .map_err(|e| SymphonyError::TemplateRenderError {
+                detail: format!("template parse error: {e}"),
+            })?;
 
     let mut globals = build_globals(issue, attempt)?;
 
     // Add stage variables when present.
     if let Some(ctx) = stage {
         let mut stage_obj = Object::new();
-        stage_obj.insert(
-            "role".into(),
-            option_to_liquid(&ctx.role),
-        );
-        stage_obj.insert(
-            "transition_to".into(),
-            option_to_liquid(&ctx.transition_to),
-        );
-        stage_obj.insert(
-            "reject_to".into(),
-            option_to_liquid(&ctx.reject_to),
-        );
+        stage_obj.insert("role".into(), option_to_liquid(&ctx.role));
+        stage_obj.insert("transition_to".into(), option_to_liquid(&ctx.transition_to));
+        stage_obj.insert("reject_to".into(), option_to_liquid(&ctx.reject_to));
         globals.insert("stage".into(), LiquidValue::Object(stage_obj));
         globals.insert(
             "default_prompt".into(),
@@ -135,11 +128,11 @@ pub fn render_prompt_with_stage(
         );
     }
 
-    let rendered = compiled.render(&globals).map_err(|e| {
-        SymphonyError::TemplateRenderError {
+    let rendered = compiled
+        .render(&globals)
+        .map_err(|e| SymphonyError::TemplateRenderError {
             detail: format!("template render error: {e}"),
-        }
-    })?;
+        })?;
 
     Ok(rendered)
 }
@@ -176,10 +169,7 @@ fn build_issue_object(issue: &Issue) -> Result<Object, SymphonyError> {
     obj.insert("id".into(), to_liquid_str(&issue.id));
     obj.insert("identifier".into(), to_liquid_str(&issue.identifier));
     obj.insert("title".into(), to_liquid_str(&issue.title));
-    obj.insert(
-        "description".into(),
-        option_to_liquid(&issue.description),
-    );
+    obj.insert("description".into(), option_to_liquid(&issue.description));
     obj.insert(
         "priority".into(),
         issue
@@ -188,18 +178,11 @@ fn build_issue_object(issue: &Issue) -> Result<Object, SymphonyError> {
             .unwrap_or(LiquidValue::Nil),
     );
     obj.insert("state".into(), to_liquid_str(&issue.state));
-    obj.insert(
-        "branch_name".into(),
-        option_to_liquid(&issue.branch_name),
-    );
+    obj.insert("branch_name".into(), option_to_liquid(&issue.branch_name));
     obj.insert("url".into(), option_to_liquid(&issue.url));
 
     // Labels as array of strings.
-    let labels: Vec<LiquidValue> = issue
-        .labels
-        .iter()
-        .map(|l| to_liquid_str(l))
-        .collect();
+    let labels: Vec<LiquidValue> = issue.labels.iter().map(|l| to_liquid_str(l)).collect();
     obj.insert("labels".into(), LiquidValue::Array(labels));
 
     // Blocked-by as array of objects.
@@ -272,8 +255,7 @@ mod tests {
 
     #[test]
     fn labels_iteration() {
-        let template =
-            "Labels: {% for label in issue.labels %}{{ label }}{% unless forloop.last %}, {% endunless %}{% endfor %}";
+        let template = "Labels: {% for label in issue.labels %}{{ label }}{% unless forloop.last %}, {% endunless %}{% endfor %}";
         let result = render_prompt(template, &sample_issue(), None).unwrap();
         assert_eq!(result, "Labels: bug, auth");
     }
@@ -360,8 +342,7 @@ mod tests {
             reject_to: None,
             default_prompt: String::new(),
         };
-        let result =
-            render_prompt_with_stage(template, &sample_issue(), None, Some(&ctx)).unwrap();
+        let result = render_prompt_with_stage(template, &sample_issue(), None, Some(&ctx)).unwrap();
         assert_eq!(result, "Role: reviewer");
     }
 
@@ -374,8 +355,7 @@ mod tests {
             reject_to: Some("rework".to_string()),
             default_prompt: String::new(),
         };
-        let result =
-            render_prompt_with_stage(template, &sample_issue(), None, Some(&ctx)).unwrap();
+        let result = render_prompt_with_stage(template, &sample_issue(), None, Some(&ctx)).unwrap();
         assert_eq!(result, "Next: human-review, Back: rework");
     }
 
@@ -392,8 +372,7 @@ mod tests {
             default_prompt: base_rendered.clone(),
         };
         let result =
-            render_prompt_with_stage(stage_template, &sample_issue(), None, Some(&ctx))
-                .unwrap();
+            render_prompt_with_stage(stage_template, &sample_issue(), None, Some(&ctx)).unwrap();
         assert_eq!(result, format!("Stage prompt. {base_rendered}"));
     }
 
@@ -406,16 +385,14 @@ mod tests {
             reject_to: None,
             default_prompt: String::new(),
         };
-        let result =
-            render_prompt_with_stage(template, &sample_issue(), None, Some(&ctx)).unwrap();
+        let result = render_prompt_with_stage(template, &sample_issue(), None, Some(&ctx)).unwrap();
         assert_eq!(result, "no role");
     }
 
     #[test]
     fn render_with_stage_none_falls_back_to_regular() {
         let template = "Issue: {{ issue.title }}";
-        let result =
-            render_prompt_with_stage(template, &sample_issue(), None, None).unwrap();
+        let result = render_prompt_with_stage(template, &sample_issue(), None, None).unwrap();
         assert_eq!(result, "Issue: Fix login bug");
     }
 }

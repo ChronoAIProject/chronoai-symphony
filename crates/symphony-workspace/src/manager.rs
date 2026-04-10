@@ -1,7 +1,10 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use symphony_core::domain::Workspace;
 use symphony_core::error::SymphonyError;
+use tokio::sync::Mutex as AsyncMutex;
 use tracing::{info, warn};
 
 use crate::hooks::run_hook;
@@ -20,6 +23,7 @@ pub struct WorkspaceManager {
     after_run_hook: Option<String>,
     before_remove_hook: Option<String>,
     hook_timeout_ms: u64,
+    prepare_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
 }
 
 impl WorkspaceManager {
@@ -48,6 +52,7 @@ impl WorkspaceManager {
             after_run_hook: after_run,
             before_remove_hook: before_remove,
             hook_timeout_ms,
+            prepare_locks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -59,6 +64,31 @@ impl WorkspaceManager {
         self.root.join(&key)
     }
 
+    /// Create or locate a workspace and run the `before_run` hook under a
+    /// per-workspace async mutex so concurrent same-issue workers do not race
+    /// through initial git setup.
+    pub async fn prepare_for_issue(
+        &self,
+        identifier: &str,
+        issue_id: Option<&str>,
+        issue_identifier: Option<&str>,
+    ) -> Result<Workspace, SymphonyError> {
+        let workspace_key = sanitize_workspace_key(identifier);
+        let lock = {
+            let mut locks = self.prepare_locks.lock().unwrap();
+            locks
+                .entry(workspace_key)
+                .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+                .clone()
+        };
+
+        let _guard = lock.lock().await;
+        let workspace = self.create_for_issue(identifier).await?;
+        self.run_before_run_hook(&workspace.path, issue_id, issue_identifier)
+            .await?;
+        Ok(workspace)
+    }
+
     /// Create (or locate) a workspace directory for the given issue.
     ///
     /// 1. Sanitize the identifier to a filesystem-safe workspace key.
@@ -68,10 +98,7 @@ impl WorkspaceManager {
     /// 5. If newly created and an `after_create` hook is configured, run it.
     ///    On hook failure the directory is removed and the error propagated.
     /// 6. Return a `Workspace` descriptor.
-    pub async fn create_for_issue(
-        &self,
-        identifier: &str,
-    ) -> Result<Workspace, SymphonyError> {
+    pub async fn create_for_issue(&self, identifier: &str) -> Result<Workspace, SymphonyError> {
         let workspace_key = sanitize_workspace_key(identifier);
         let path = self.root.join(&workspace_key);
 
@@ -166,7 +193,12 @@ impl WorkspaceManager {
     ///
     /// Call this after an agent session completes. Failures are logged but
     /// not propagated.
-    pub async fn run_after_run_hook(&self, workspace_path: &Path, issue_id: Option<&str>, issue_identifier: Option<&str>) {
+    pub async fn run_after_run_hook(
+        &self,
+        workspace_path: &Path,
+        issue_id: Option<&str>,
+        issue_identifier: Option<&str>,
+    ) {
         if let Some(ref script) = self.after_run_hook {
             if let Err(e) = run_hook(
                 "after_run",
@@ -191,10 +223,7 @@ impl WorkspaceManager {
     ///
     /// If a `before_remove` hook is configured it runs first (best effort).
     /// The directory is then removed recursively.
-    pub async fn cleanup_workspace(
-        &self,
-        identifier: &str,
-    ) -> Result<(), SymphonyError> {
+    pub async fn cleanup_workspace(&self, identifier: &str) -> Result<(), SymphonyError> {
         let workspace_key = sanitize_workspace_key(identifier);
         let path = self.root.join(&workspace_key);
 
@@ -220,13 +249,14 @@ impl WorkspaceManager {
         tokio::fs::remove_dir_all(&path)
             .await
             .map_err(|e| SymphonyError::WorkspaceError {
-                detail: format!(
-                    "failed to remove workspace '{}': {e}",
-                    path.display()
-                ),
+                detail: format!("failed to remove workspace '{}': {e}", path.display()),
             })?;
 
         info!(workspace_key = %workspace_key, "workspace cleaned up");
+
+        let mut locks = self.prepare_locks.lock().unwrap();
+        locks.remove(&workspace_key);
+
         Ok(())
     }
 }
@@ -318,5 +348,45 @@ mod tests {
 
         let expected_path = tmp.path().join("will-fail");
         assert!(!expected_path.exists());
+    }
+
+    #[tokio::test]
+    async fn prepare_for_issue_serializes_before_run_for_same_workspace() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = WorkspaceManager::new(
+            tmp.path().to_path_buf(),
+            None,
+            Some(
+                r#"
+if [ -f .before_run_lock ]; then
+  exit 23
+fi
+touch .before_run_lock
+sleep 0.2
+echo "$SYMPHONY_ISSUE_IDENTIFIER" >> before_run.log
+rm .before_run_lock
+"#
+                .trim()
+                .to_owned(),
+            ),
+            None,
+            None,
+            5_000,
+        );
+
+        let (left, right) = tokio::join!(
+            mgr.prepare_for_issue("same-issue", Some("42"), Some("#42")),
+            mgr.prepare_for_issue("same-issue", Some("42"), Some("#42"))
+        );
+
+        let left = left.unwrap();
+        let right = right.unwrap();
+        assert_eq!(left.path, right.path);
+
+        let before_run_log = tokio::fs::read_to_string(left.path.join("before_run.log"))
+            .await
+            .unwrap();
+        let lines: Vec<&str> = before_run_log.lines().collect();
+        assert_eq!(lines, vec!["#42", "#42"]);
     }
 }

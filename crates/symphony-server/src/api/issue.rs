@@ -4,10 +4,10 @@
 
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::router::AppState;
 
@@ -75,9 +75,7 @@ fn matches_identifier(entry: &Value, identifier: &str) -> bool {
     entry
         .get("identifier")
         .and_then(|v| v.as_str())
-        .is_some_and(|entry_id| {
-            entry_id.trim().eq_ignore_ascii_case(identifier.trim())
-        })
+        .is_some_and(|entry_id| entry_id.trim().eq_ignore_ascii_case(identifier.trim()))
 }
 
 #[cfg(test)]
