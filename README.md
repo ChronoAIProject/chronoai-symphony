@@ -293,8 +293,6 @@ agents:
   codex:
     command: codex app-server          # Launch command.
     approval_policy: never             # never, on-request, granular, etc.
-    thread_sandbox: danger-full-access # Trusted isolated runner default.
-    turn_sandbox_policy: danger-full-access
     model: gpt-5.3-codex              # Passed as --model flag + env var.
     reasoning_effort: xhigh            # Passed as --config flag + env var.
     network_access: true               # Sandbox network access. Default: true.
@@ -410,10 +408,10 @@ When `WORKFLOW.md` changes at runtime, Symphony validates the new config before 
 
 The example workflows in this repo assume Symphony runs inside a dedicated trusted environment such as an isolated VM, devcontainer, or CI worker. That is why the default examples are permissive:
 
-- Codex uses `approval_policy: never`, `thread_sandbox: danger-full-access`, and `turn_sandbox_policy: danger-full-access`.
+- Codex uses `approval_policy: never`. Symphony sends a structured `workspaceWrite` sandbox policy by default with full network access.
 - Claude uses `approval_policy: never` and leaves `allowed_tools` / `disallowed_tools` unset so the CLI can use its full tool surface.
 
-If your environment is less trusted, tighten those fields deliberately rather than copying the permissive defaults unchanged.
+If your environment is less trusted, tighten those fields deliberately.
 
 ### Parallel agent coordination
 
@@ -672,8 +670,6 @@ agents:
   codex:
     command: codex app-server
     approval_policy: never
-    thread_sandbox: danger-full-access
-    turn_sandbox_policy: danger-full-access
     model: gpt-5.3-codex
     reasoning_effort: xhigh           # Codex: -c model_reasoning_effort=xhigh
   claude:
@@ -706,8 +702,6 @@ agents:
   codex:
     command: codex app-server
     approval_policy: never
-    thread_sandbox: danger-full-access
-    turn_sandbox_policy: danger-full-access
     model: gpt-5.3-codex
   claude:
     agent_type: claude-cli
