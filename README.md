@@ -823,7 +823,8 @@ pipeline:
       role: triage
       prompt: |
         Assess {{ issue.identifier }}. Determine affected areas.
-        Add labels: `backend`, `frontend`, or both.
+        Add exactly one routing combination:
+        - `backend` only, `frontend` only, both for parallel, or `fullstack` for cross-cutting.
         If complex: create an implementation plan.
         Move to in-progress.
       transition_to: in-progress
@@ -843,10 +844,12 @@ pipeline:
       scope: frontend/
       transition_to: code-review
 
-    # Fallback: runs when triage didn't add routing labels
+    # Fullstack: triage adds "fullstack" label for cross-cutting work
     - state: in-progress
       agent: codex
       role: implementer
+      when_labels: [fullstack]
+      scope: src/
       transition_to: code-review
 ```
 
@@ -873,13 +876,12 @@ graph TB
 | Adds `backend` + `frontend` | Both agents run **in parallel**, each scoped to their directory |
 | Adds `backend` only | Only the backend stage runs |
 | Adds `frontend` only | Only the frontend stage runs |
-| Adds neither | The fallback fullstack agent runs |
+| Adds `fullstack` | The fullstack agent runs (cross-cutting work) |
 | Complex issue | Triage creates architecture plan in workpad before moving to in-progress |
 
 **Key points:**
 - The **triage agent** (Claude on `todo`) is the smart router. It reads the issue, assesses complexity, creates plans for complex work, and adds routing labels. No manual label management needed.
-- `when_labels` are user-defined GitHub labels. Any label name works.
-- Stages **with** `when_labels` take priority over fallbacks (those without).
+- `when_labels` are user-defined GitHub labels. Any label name works. Every parallel stage must have `when_labels` and a non-root `scope`.
 - `scope` is appended to the prompt: "Focus your changes on the `backend/` directory."
 - Parallel workers also get local coordination files under `.symphony/coordination/` so they can exchange durable notes without rewriting each other's workpads.
 - Each parallel worker gets its own session, activity feed, and token tracking in the dashboard.

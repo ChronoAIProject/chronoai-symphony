@@ -143,7 +143,8 @@ agents:
 #         You are a senior technical lead triaging {{ issue.identifier }}.
 #         {{ issue.description }}
 #         1. Assess what needs to change and which parts are affected.
-#         2. Add labels: `backend`, `frontend`, or both (for parallel agents).
+#         2. Add exactly one routing combination:
+#            - `backend` only, `frontend` only, both for parallel, or `fullstack` for cross-cutting work.
 #         3. If complex: create a workpad comment with an implementation plan.
 #         4. Move to in-progress: `gh issue edit {{ issue.identifier }} --remove-label todo --add-label in-progress`
 #
@@ -164,10 +165,12 @@ agents:
 #       scope: frontend/
 #       transition_to: code-review
 #
-#     # Fullstack fallback: triage didn't add backend/frontend labels
+#     # Fullstack: triage adds "fullstack" label for cross-cutting work
 #     - state: in-progress
 #       agent: codex
 #       role: implementer
+#       when_labels: [fullstack]
+#       scope: src/
 #       transition_to: code-review
 #
 #     # Code review
