@@ -947,16 +947,14 @@ hooks:
     git fetch origin
     # ... branch checkout logic ...
 
-    # mempalace: load relevant memories for ALL agents (Claude, Codex, any future agent).
-    # Every agent reads .symphony/mempalace_context.md at session start.
+    # mempalace: load wake-up context (L0+L1) and issue-relevant memories.
     MP="python3 -m mempalace"
     mkdir -p .symphony
+    $MP wake-up > .symphony/mempalace_wakeup.md 2>/dev/null || true
     $MP search "issue ${SYMPHONY_ISSUE_NUMBER}" --limit 10 \
       > .symphony/mempalace_context.md 2>/dev/null || true
 
-    # Register MCP server so Claude Code gets interactive read/write on top.
-    # `claude mcp add --scope local` merges into .claude/settings.local.json
-    # without clobbering existing settings. Idempotent.
+    # Register MCP server so Claude Code gets interactive search/store via 19 tools.
     if command -v claude >/dev/null 2>&1; then
       claude mcp add --scope local mempalace -- python3 -m mempalace.mcp_server 2>/dev/null || true
     fi
@@ -970,24 +968,36 @@ hooks:
     fi
 ```
 
-Then reference the context file in your prompt template so agents know to read it:
+Then add a MemPalace section to your prompt template so agents know to read context files and use MCP tools:
 
 ```liquid
-{% if stage.role %}
-Read `.symphony/mempalace_context.md` if it exists for relevant prior decisions and context from earlier sessions.
-{% endif %}
+## MemPalace — Cross-Session Memory
+
+**At session start:**
+1. Read `.symphony/mempalace_wakeup.md` if it exists — identity and critical facts (L0+L1).
+2. Read `.symphony/mempalace_context.md` if it exists — memories relevant to this issue.
+
+**During work:** Before making decisions, search memory first via `mempalace_search` or
+`mempalace_kg_query`. Do not guess — verify against memory.
+
+**At session end:** Store decisions and findings for future agents via `mempalace_diary_write`
+(role-specific) or `mempalace_kg_add` (entity relationships).
 ```
+
+Agents need explicit instructions to use mempalace — having the MCP server connected alone is not enough. Without the prompt section above, agents acknowledge tools exist but never invoke them.
 
 **How the memory flows between agents:**
 
 ```text
   after_create (once)            before_run (each session)         after_run (each session)
  ┌──────────────────┐          ┌────────────────────────┐        ┌───────────────────────┐
- │ mine project     │          │ search → context file  │        │ mine coordination/    │
- │ into palace      │──────►   │ (all agents read it)   │        │ back into palace      │
- └──────────────────┘          │                        │        └───────────┬───────────┘
+ │ mine project     │          │ wake-up → L0+L1 file   │        │ mine coordination/    │
+ │ into palace      │──────►   │ search → context file  │        │ back into palace      │
+ └──────────────────┘          │ (all agents read both) │        └───────────┬───────────┘
+                               │                        │                    │
                                │ + MCP for Claude       │                    │
-                               │   (interactive r/w)    │                    │
+                               │   (19 tools: search,   │                    │
+                               │    diary, kg, etc.)     │                    │
                                └────────────────────────┘                    │
                                           │                                  │
                                           ▼                                  │
@@ -1001,8 +1011,9 @@ Read `.symphony/mempalace_context.md` if it exists for relevant prior decisions 
 | Hook | What it does | Who benefits |
 |------|-------------|-------------|
 | `after_create` | Mines project code/docs into palace once | All future agents on this project |
-| `before_run` context file | Loads relevant memories into `.symphony/mempalace_context.md` | Every agent (Codex, Claude, any agent that reads files) |
-| `before_run` MCP | Registers mempalace MCP server for Claude | Claude Code (interactive search/store during session) |
+| `before_run` wake-up | Generates L0+L1 identity/facts into `.symphony/mempalace_wakeup.md` (~170 tokens) | Every agent (stable context about project and team) |
+| `before_run` search | Loads issue-relevant memories into `.symphony/mempalace_context.md` | Every agent (Codex, Claude, any agent that reads files) |
+| `before_run` MCP | Registers mempalace MCP server (19 tools) for Claude | Claude Code (interactive search/store/diary/kg during session) |
 | `after_run` | Mines `.symphony/coordination/` artifacts back into palace | All future agents (inherits decisions, handoffs, findings) |
 
 **How the marker file works:**

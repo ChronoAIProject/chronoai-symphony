@@ -60,13 +60,13 @@ hooks:
       git checkout main && git pull
       git checkout -b "$BRANCH" origin/main
     fi
-    # Optional: mempalace shared context for all agents (Claude, Codex, any future agent).
-    # Loads relevant memories into a workspace file every agent can read.
+    # Optional: mempalace — load wake-up context (L0+L1) and issue-relevant memories.
     # MP="python3 -m mempalace"
     # mkdir -p .symphony
+    # $MP wake-up > .symphony/mempalace_wakeup.md 2>/dev/null || true
     # $MP search "issue ${SYMPHONY_ISSUE_NUMBER}" --limit 10 \
     #   > .symphony/mempalace_context.md 2>/dev/null || true
-    # Register MCP server so Claude Code gets interactive read/write on top.
+    # Register MCP server so Claude Code gets interactive search/store via 19 tools.
     # if command -v claude >/dev/null 2>&1; then
     #   claude mcp add --scope local mempalace -- python3 -m mempalace.mcp_server 2>/dev/null || true
     # fi
