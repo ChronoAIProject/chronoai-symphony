@@ -148,6 +148,9 @@ agents:
 #         3. If complex: create a workpad comment with an implementation plan.
 #         4. Move to in-progress: `gh issue edit {{ issue.identifier }} --remove-label todo --add-label in-progress`
 #
+#         CRITICAL: You are a TRIAGE agent. Do NOT write code, create branches, or open PRs.
+#         Once you have added labels and moved the issue to in-progress, STOP.
+#
 #         {{ default_prompt }}
 #       transition_to: in-progress
 #
@@ -181,6 +184,9 @@ agents:
 #         Review PR for {{ issue.identifier }}: `gh pr diff`
 #         If good: add label `human-review`, remove `code-review`.
 #         If needs work: post review comments, add label `rework`, remove `code-review`.
+#
+#         CRITICAL: You are a REVIEW agent. Do NOT write code or push commits.
+#         Once you have reviewed and transitioned the issue, STOP.
 #
 #         {{ default_prompt }}
 #       transition_to: human-review
