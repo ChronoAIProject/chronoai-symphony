@@ -62,12 +62,22 @@ hooks:
       corepack enable
       yarn install --frozen-lockfile
     fi
-    # Optional: register mempalace MCP server for Claude Code sessions.
-    # if command -v mempalace >/dev/null 2>&1 && command -v claude >/dev/null 2>&1; then
+    # Optional: mempalace shared context for all agents (Claude, Codex, any future agent).
+    # if command -v mempalace >/dev/null 2>&1; then
+    #   mkdir -p .symphony
+    #   mempalace search "issue ${SYMPHONY_ISSUE_NUMBER}" --limit 10 \
+    #     > .symphony/mempalace_context.md 2>/dev/null || true
+    # fi
+    # Register MCP server so Claude Code gets interactive read/write on top.
+    # if command -v claude >/dev/null 2>&1 && command -v mempalace >/dev/null 2>&1; then
     #   claude mcp add --scope local mempalace -- python -m mempalace.mcp_server
     # fi
   after_run: |
     echo "Webapp workflow finished for ${SYMPHONY_ISSUE_IDENTIFIER}"
+    # Optional: store coordination artifacts back into shared mempalace.
+    # if command -v mempalace >/dev/null 2>&1 && [ -d .symphony/coordination ]; then
+    #   mempalace mine .symphony/coordination --mode general 2>/dev/null || true
+    # fi
   timeout_ms: 300000
 
 agent:

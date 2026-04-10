@@ -922,9 +922,11 @@ graph TB
 pip install mempalace
 ```
 
+**Shared across all agents.** Memory is not per-agent or per-agent-type. When the Codex implementer stores a decision on issue #42, the Claude reviewer on the same issue can read it, and the Codex implementer on issue #43 can find it later. The palace is the shared substrate -- all agents contribute to and read from the same store.
+
 **Hook configuration:**
 
-Add the commented mempalace blocks to your WORKFLOW.md hooks. The `after_create` hook mines the project once using a marker file to avoid re-mining on every issue. The `before_run` hook registers the mempalace MCP server so Claude Code agents discover its tools automatically.
+Three hooks wire up the full read/write cycle. `after_create` mines the project once. `before_run` loads relevant memories for the current issue so every agent starts with context. `after_run` stores coordination artifacts back so the next agent inherits what this session decided.
 
 ```yaml
 hooks:
@@ -948,50 +950,78 @@ hooks:
     git fetch origin
     # ... branch checkout logic ...
 
-    # mempalace: register MCP server for Claude Code sessions.
-    # `claude mcp add` merges safely into existing settings without clobbering.
-    if command -v mempalace >/dev/null 2>&1 && command -v claude >/dev/null 2>&1; then
+    # mempalace: load relevant memories for ALL agents (Claude, Codex, any future agent).
+    # Every agent reads .symphony/mempalace_context.md at session start.
+    if command -v mempalace >/dev/null 2>&1; then
+      mkdir -p .symphony
+      mempalace search "issue ${SYMPHONY_ISSUE_NUMBER}" --limit 10 \
+        > .symphony/mempalace_context.md 2>/dev/null || true
+    fi
+
+    # Register MCP server so Claude Code gets interactive read/write on top.
+    # `claude mcp add --scope local` merges into .claude/settings.local.json
+    # without clobbering existing settings. Idempotent.
+    if command -v claude >/dev/null 2>&1 && command -v mempalace >/dev/null 2>&1; then
       claude mcp add --scope local mempalace -- python -m mempalace.mcp_server
+    fi
+
+  after_run: |
+    # mempalace: store coordination artifacts back into shared palace so the
+    # next agent (any type, any issue) can find what this session decided.
+    if command -v mempalace >/dev/null 2>&1 && [ -d .symphony/coordination ]; then
+      mempalace mine .symphony/coordination --mode general 2>/dev/null || true
     fi
 ```
 
-`claude mcp add --scope local` writes the MCP server entry into the workspace-local `.claude/settings.local.json`, which merges with any existing `.claude/settings.json` the repo may already ship. It is idempotent -- running it again for the same name is a no-op.
+Then reference the context file in your prompt template so agents know to read it:
 
-Once registered, Claude Code agents dispatched by Symphony automatically discover all 19 mempalace MCP tools. No Rust code changes are needed.
+```liquid
+{% if stage.role %}
+Read `.symphony/mempalace_context.md` if it exists for relevant prior decisions and context from earlier sessions.
+{% endif %}
+```
+
+**How the memory flows between agents:**
+
+```text
+  after_create (once)            before_run (each session)         after_run (each session)
+ ┌──────────────────┐          ┌────────────────────────┐        ┌───────────────────────┐
+ │ mine project     │          │ search → context file  │        │ mine coordination/    │
+ │ into palace      │──────►   │ (all agents read it)   │        │ back into palace      │
+ └──────────────────┘          │                        │        └───────────┬───────────┘
+                               │ + MCP for Claude       │                    │
+                               │   (interactive r/w)    │                    │
+                               └────────────────────────┘                    │
+                                          │                                  │
+                                          ▼                                  │
+                                ┌──────────────────┐                         │
+                                │   Agent session   │                        │
+                                │ (Codex, Claude,   │────────────────────────┘
+                                │  or any future)   │
+                                └──────────────────┘
+```
+
+| Hook | What it does | Who benefits |
+|------|-------------|-------------|
+| `after_create` | Mines project code/docs into palace once | All future agents on this project |
+| `before_run` context file | Loads relevant memories into `.symphony/mempalace_context.md` | Every agent (Codex, Claude, any agent that reads files) |
+| `before_run` MCP | Registers mempalace MCP server for Claude | Claude Code (interactive search/store during session) |
+| `after_run` | Mines `.symphony/coordination/` artifacts back into palace | All future agents (inherits decisions, handoffs, findings) |
 
 **How the marker file works:**
 
 The first `after_create` invocation derives a project slug from the git remote (`your-org/your-repo`), mines the repo into the palace, and writes `~/.mempalace/.mined_your-org-your-repo`. Subsequent workspaces for the same project see the marker and skip mining entirely. To re-mine after major repo changes, delete the marker file. If the remote URL does not match (non-GitHub hosts), adjust the `sed` pattern or set `SLUG` directly.
 
-**For Codex agents** (no native MCP support), load context via the CLI in hooks:
-
-```yaml
-hooks:
-  before_run: |
-    # Load relevant memories into a context file Codex can read
-    if command -v mempalace >/dev/null 2>&1; then
-      mempalace search "issue ${SYMPHONY_ISSUE_NUMBER}" --limit 5 \
-        > .symphony/mempalace_context.md 2>/dev/null || true
-    fi
-```
-
-Then reference the context file in your prompt template:
-
-```liquid
-{% if stage.role == "implementer" %}
-Read `.symphony/mempalace_context.md` if it exists for relevant prior decisions.
-{% endif %}
-```
-
 **Relationship to Symphony coordination:**
 
-Symphony's built-in coordination (notes, mailbox, claims) is for the current session: this issue, these agents, right now. mempalace adds cross-session memory: what happened on previous issues, what patterns keep recurring, what architectural decisions were made and why.
+Symphony's built-in coordination (notes, mailbox, claims) is for the current session: this issue, these agents, right now. mempalace adds cross-session memory: what happened on previous issues, what patterns keep recurring, what architectural decisions were made and why. The `after_run` hook bridges the two by mining coordination artifacts into the palace after each session.
 
 | Symphony coordination | mempalace |
 |----------------------|-----------|
 | `symphony_note` -- ephemeral, per-issue | Persistent, cross-issue, searchable |
 | `symphony_mailbox` -- real-time role-to-role | Historical knowledge graph with temporal queries |
 | `symphony_claim` -- scope ownership this session | Project-level decision memory across sessions |
+| Cleaned up when workspace is removed | Survives workspace cleanup, accumulates over time |
 
 ## Authentication
 
