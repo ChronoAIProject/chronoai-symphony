@@ -898,6 +898,101 @@ graph TB
 | Model flag | `-c model=<value>` | `--model <value>` |
 | Reasoning effort | `-c model_reasoning_effort=<value>` | `--effort <value>` (low/medium/high/max) |
 
+## Integrations
+
+### Agent memory with mempalace
+
+[mempalace](https://github.com/milla-jovovich/mempalace) is an optional integration that gives agents persistent, searchable memory across sessions. Without it, each agent session starts with no knowledge of what previous sessions decided, tried, or learned. With mempalace, agents can recall past decisions, patterns, and context from earlier issues in the same project.
+
+**Key design: one palace per project, not per workspace.** Symphony creates a separate workspace directory for every issue, and cleans them up when the issue reaches a terminal state. The mempalace palace lives outside the workspace tree at a shared location (default `~/.mempalace/`) so that all issue workspaces read from and write to the same project memory. Initialization and mining happen once; the palace accumulates knowledge over time.
+
+```text
+~/.mempalace/  (persistent, shared across all issues)
+  palace data: wings, rooms, knowledge graph
+
+/tmp/symphony_workspaces/
+  _42/  ──reads/writes──►  shared palace
+  _43/  ──reads/writes──►  shared palace
+  _44/  ──reads/writes──►  shared palace
+```
+
+**Prerequisites:**
+
+```bash
+pip install mempalace
+```
+
+**Hook configuration:**
+
+Add the commented mempalace blocks to your WORKFLOW.md hooks. The `after_create` hook mines the project once using a marker file to avoid re-mining on every issue. The `before_run` hook registers the mempalace MCP server so Claude Code agents discover its tools automatically.
+
+```yaml
+hooks:
+  after_create: |
+    git clone --depth 1 https://github.com/your-org/your-repo.git .
+
+    # mempalace: mine project into shared palace (one-time, skipped on later issues)
+    if command -v mempalace >/dev/null 2>&1; then
+      SLUG="$(git remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git$||')"
+      if [ -n "$SLUG" ]; then
+        MARKER="$HOME/.mempalace/.mined_$(echo "$SLUG" | tr '/' '-')"
+        if [ ! -f "$MARKER" ]; then
+          mempalace init 2>/dev/null || true
+          mempalace mine . --mode projects 2>/dev/null || true
+          touch "$MARKER"
+        fi
+      fi
+    fi
+
+  before_run: |
+    git fetch origin
+    # ... branch checkout logic ...
+
+    # mempalace: register MCP server for Claude Code sessions.
+    # `claude mcp add` merges safely into existing settings without clobbering.
+    if command -v mempalace >/dev/null 2>&1 && command -v claude >/dev/null 2>&1; then
+      claude mcp add --scope local mempalace -- python -m mempalace.mcp_server
+    fi
+```
+
+`claude mcp add --scope local` writes the MCP server entry into the workspace-local `.claude/settings.local.json`, which merges with any existing `.claude/settings.json` the repo may already ship. It is idempotent -- running it again for the same name is a no-op.
+
+Once registered, Claude Code agents dispatched by Symphony automatically discover all 19 mempalace MCP tools. No Rust code changes are needed.
+
+**How the marker file works:**
+
+The first `after_create` invocation derives a project slug from the git remote (`your-org/your-repo`), mines the repo into the palace, and writes `~/.mempalace/.mined_your-org-your-repo`. Subsequent workspaces for the same project see the marker and skip mining entirely. To re-mine after major repo changes, delete the marker file. If the remote URL does not match (non-GitHub hosts), adjust the `sed` pattern or set `SLUG` directly.
+
+**For Codex agents** (no native MCP support), load context via the CLI in hooks:
+
+```yaml
+hooks:
+  before_run: |
+    # Load relevant memories into a context file Codex can read
+    if command -v mempalace >/dev/null 2>&1; then
+      mempalace search "issue ${SYMPHONY_ISSUE_NUMBER}" --limit 5 \
+        > .symphony/mempalace_context.md 2>/dev/null || true
+    fi
+```
+
+Then reference the context file in your prompt template:
+
+```liquid
+{% if stage.role == "implementer" %}
+Read `.symphony/mempalace_context.md` if it exists for relevant prior decisions.
+{% endif %}
+```
+
+**Relationship to Symphony coordination:**
+
+Symphony's built-in coordination (notes, mailbox, claims) is for the current session: this issue, these agents, right now. mempalace adds cross-session memory: what happened on previous issues, what patterns keep recurring, what architectural decisions were made and why.
+
+| Symphony coordination | mempalace |
+|----------------------|-----------|
+| `symphony_note` -- ephemeral, per-issue | Persistent, cross-issue, searchable |
+| `symphony_mailbox` -- real-time role-to-role | Historical knowledge graph with temporal queries |
+| `symphony_claim` -- scope ownership this session | Project-level decision memory across sessions |
+
 ## Authentication
 
 Symphony supports two authentication methods. Both are used by Symphony (for polling) and by the coding agent (for pushing code, creating PRs, updating labels).

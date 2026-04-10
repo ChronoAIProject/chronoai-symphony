@@ -32,6 +32,20 @@ git:
 hooks:
   after_create: |
     git clone --depth 1 https://github.com/your-org/your-repo.git .
+    # Optional: mempalace agent memory (pip install mempalace). See README § Agent memory.
+    # Mines the project once into a shared palace at ~/.mempalace/. The marker file
+    # prevents re-mining when later issues create new workspaces for the same project.
+    # if command -v mempalace >/dev/null 2>&1; then
+    #   SLUG="$(git remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git$||')"
+    #   if [ -n "$SLUG" ]; then
+    #     MARKER="$HOME/.mempalace/.mined_$(echo "$SLUG" | tr '/' '-')"
+    #     if [ ! -f "$MARKER" ]; then
+    #       mempalace init 2>/dev/null || true
+    #       mempalace mine . --mode projects 2>/dev/null || true
+    #       touch "$MARKER"
+    #     fi
+    #   fi
+    # fi
   before_run: |
     git fetch origin
     BRANCH="symphony/issue-${SYMPHONY_ISSUE_NUMBER}"
@@ -44,6 +58,11 @@ hooks:
       git checkout main && git pull
       git checkout -b "$BRANCH" origin/main
     fi
+    # Optional: register mempalace MCP server for Claude Code sessions.
+    # Uses `claude mcp add` which merges safely into existing settings.
+    # if command -v mempalace >/dev/null 2>&1 && command -v claude >/dev/null 2>&1; then
+    #   claude mcp add --scope local mempalace -- python -m mempalace.mcp_server
+    # fi
   after_run: |
     echo "Agent session completed for ${SYMPHONY_ISSUE_IDENTIFIER}"
   timeout_ms: 300000
