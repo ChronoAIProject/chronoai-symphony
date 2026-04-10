@@ -423,7 +423,7 @@ When multiple agents work on the same issue, Symphony prepares local coordinatio
 - `.symphony/coordination/handoffs.md` for targeted baton-passes such as `To reviewer: ...`
 - `.symphony/coordination/roles/<role>.md` for one role's local notes
 
-This is intentionally closer to `chrono-code`'s scratchpad and mailbox model than to free-form issue-comment chatter. Use the GitHub workpad for the externally visible status record and use the local coordination files for short operational notes between agents.
+This is intentionally closer to a scratchpad and mailbox model than to free-form issue-comment chatter. Use the GitHub workpad for the externally visible status record and use the local coordination files for short operational notes between agents.
 
 You do not install these helpers manually. Symphony creates them automatically inside each worker workspace under `.symphony_bin/`, prepends that directory to the agent subprocess `PATH`, and starts an internal localhost coordination API for note, mailbox, and claim operations.
 
