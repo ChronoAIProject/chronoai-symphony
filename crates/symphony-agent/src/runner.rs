@@ -608,6 +608,9 @@ mod tests {
 
         // Codex v0.118.0+ requires the tagged enum format for turn/start.
         // networkAccess is injected from the profile config.
-        assert_eq!(policy, json!({"type": "dangerFullAccess", "networkAccess": true}));
+        assert_eq!(
+            policy,
+            json!({"type": "dangerFullAccess", "networkAccess": true})
+        );
     }
 }

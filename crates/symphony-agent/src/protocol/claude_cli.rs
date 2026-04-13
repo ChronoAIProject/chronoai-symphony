@@ -41,10 +41,10 @@ impl ClaudeUsage {
 
 fn truncate_notification(message: impl Into<String>) -> String {
     let message = message.into();
-    if message.len() > MAX_NOTIFICATION_CHARS {
-        format!("{}...", &message[..MAX_NOTIFICATION_CHARS])
-    } else {
-        message
+
+    match message.char_indices().nth(MAX_NOTIFICATION_CHARS) {
+        Some((idx, _)) => format!("{}...", &message[..idx]),
+        None => message,
     }
 }
 
@@ -156,6 +156,38 @@ fn summarize_system_event(parsed: &Value) -> Option<String> {
         "local_command_output" => {
             non_empty_str(parsed.get("content")).map(|content| format!("[local] {content}"))
         }
+        "compact_boundary" => {
+            let trigger = parsed
+                .get("compact_metadata")
+                .and_then(|v| v.get("trigger"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            Some(format!("[session] compacted ({trigger})"))
+        }
+        "api_retry" => {
+            let attempt = parsed.get("attempt").and_then(|v| v.as_u64());
+            let max_retries = parsed.get("max_retries").and_then(|v| v.as_u64());
+            let retry_delay_ms = parsed.get("retry_delay_ms").and_then(|v| v.as_u64());
+            let error_message = parsed
+                .get("error")
+                .and_then(|v| v.get("message"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("API request failed");
+
+            match (attempt, max_retries, retry_delay_ms) {
+                (Some(attempt), Some(max), Some(delay)) => Some(format!(
+                    "[api:retry] {error_message} (attempt {attempt}/{max}, retrying in {}s)",
+                    delay / 1000
+                )),
+                (Some(attempt), Some(max), None) => Some(format!(
+                    "[api:retry] {error_message} (attempt {attempt}/{max})"
+                )),
+                _ => Some(format!("[api:retry] {error_message}")),
+            }
+        }
+        "post_turn_summary" => non_empty_str(parsed.get("status_detail"))
+            .or_else(|| non_empty_str(parsed.get("summary")))
+            .map(|summary| format!("[turn:summary] {summary}")),
         _ => None,
     }
 }
@@ -185,6 +217,74 @@ fn summarize_tool_progress_event(parsed: &Value) -> Option<String> {
 
 fn summarize_tool_use_summary_event(parsed: &Value) -> Option<String> {
     non_empty_str(parsed.get("summary")).map(|summary| summary.to_string())
+}
+
+fn summarize_auth_status_event(parsed: &Value) -> Option<String> {
+    if let Some(error) = non_empty_str(parsed.get("error")) {
+        return Some(format!("[auth:error] {error}"));
+    }
+
+    parsed
+        .get("output")
+        .and_then(|v| v.as_array())
+        .and_then(|lines| {
+            lines
+                .iter()
+                .filter_map(|line| line.as_str().map(str::trim))
+                .find(|line| !line.is_empty())
+        })
+        .map(|line| format!("[auth] {line}"))
+}
+
+fn result_subtype(parsed: &Value) -> Option<&str> {
+    non_empty_str(parsed.get("subtype"))
+}
+
+fn result_text(parsed: &Value) -> String {
+    parsed
+        .get("result")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn result_is_error(parsed: &Value) -> bool {
+    parsed
+        .get("is_error")
+        .and_then(|v| v.as_bool())
+        .unwrap_or_else(|| result_subtype(parsed).is_some_and(|subtype| subtype != "success"))
+}
+
+fn result_error_message(parsed: &Value) -> String {
+    let errors: Vec<&str> = parsed
+        .get("errors")
+        .and_then(|v| v.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::trim))
+                .filter(|message| !message.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let detail = if errors.is_empty() {
+        let text = result_text(parsed);
+        if text.trim().is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    } else {
+        Some(errors.join("; "))
+    };
+
+    match (result_subtype(parsed), detail) {
+        (Some("success") | None, Some(detail)) => detail,
+        (Some(subtype), Some(detail)) => format!("{subtype}: {detail}"),
+        (Some(subtype), None) => format!("Claude CLI returned {subtype}"),
+        (None, None) => "Claude CLI returned an error".to_string(),
+    }
 }
 
 /// Stream a complete Claude CLI session, parsing line-delimited JSON events.
@@ -334,6 +434,12 @@ async fn stream_claude_inner(
                 }
             }
 
+            "auth_status" => {
+                if let Some(message) = summarize_auth_status_event(&parsed) {
+                    emit_notification(event_tx, message).await;
+                }
+            }
+
             "rate_limit_event" => {
                 if let Some(info) = parsed.get("rate_limit_info") {
                     let _ = event_tx
@@ -347,10 +453,7 @@ async fn stream_claude_inner(
 
             "result" => {
                 got_result = true;
-                let is_error = parsed
-                    .get("is_error")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                let is_error = result_is_error(&parsed);
 
                 // Extract and emit final usage.
                 if let Some(usage) = extract_claude_usage(&parsed) {
@@ -362,11 +465,7 @@ async fn stream_claude_inner(
                         .await;
                 }
 
-                let result_text = parsed
-                    .get("result")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                let result_text = result_text(&parsed);
 
                 // Extract cost and duration for logging.
                 let cost = parsed.get("total_cost_usd").and_then(|v| v.as_f64());
@@ -382,11 +481,7 @@ async fn stream_claude_inner(
                 }
 
                 if is_error {
-                    let error_msg = if result_text.is_empty() {
-                        "Claude CLI returned an error".to_string()
-                    } else {
-                        result_text
-                    };
+                    let error_msg = result_error_message(&parsed);
                     let _ = event_tx
                         .send(AgentEvent::TurnFailed {
                             error: error_msg.clone(),
@@ -406,6 +501,11 @@ async fn stream_claude_inner(
                         .await;
                     final_result = TurnResult::Completed;
                 }
+
+                // SDK `result` messages are the terminal session signal. Do
+                // not wait for extra stdout/EOF after it; some launchers
+                // intentionally kill the CLI as soon as result is delivered.
+                break;
             }
 
             other => {
@@ -520,6 +620,7 @@ fn extract_claude_usage(parsed: &Value) -> Option<ClaudeUsage> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use tempfile::TempDir;
 
     #[test]
     fn parse_claude_usage_full() {
@@ -631,6 +732,66 @@ mod tests {
     }
 
     #[test]
+    fn truncate_notification_handles_multibyte_text() {
+        let message = "\u{1f642}".repeat(MAX_NOTIFICATION_CHARS + 1);
+        let truncated = truncate_notification(message);
+
+        assert!(truncated.ends_with("..."));
+        assert_eq!(
+            truncated.trim_end_matches('.').chars().count(),
+            MAX_NOTIFICATION_CHARS
+        );
+    }
+
+    #[test]
+    fn result_error_message_uses_sdk_errors_array() {
+        let event = json!({
+            "type": "result",
+            "subtype": "error_max_turns",
+            "is_error": true,
+            "errors": ["Reached maximum number of turns (20)"],
+            "usage": {
+                "input_tokens": 200,
+                "output_tokens": 50
+            }
+        });
+
+        assert!(result_is_error(&event));
+        assert_eq!(
+            result_error_message(&event),
+            "error_max_turns: Reached maximum number of turns (20)"
+        );
+    }
+
+    #[test]
+    fn result_error_message_falls_back_to_result_text() {
+        let event = json!({
+            "type": "result",
+            "subtype": "success",
+            "result": "API error response",
+            "is_error": true
+        });
+
+        assert!(result_is_error(&event));
+        assert_eq!(result_error_message(&event), "API error response");
+    }
+
+    #[test]
+    fn result_subtype_detects_error_without_is_error_field() {
+        let event = json!({
+            "type": "result",
+            "subtype": "error_during_execution",
+            "errors": ["Execution error"]
+        });
+
+        assert!(result_is_error(&event));
+        assert_eq!(
+            result_error_message(&event),
+            "error_during_execution: Execution error"
+        );
+    }
+
+    #[test]
     fn parse_system_event() {
         let event = json!({
             "type": "system",
@@ -717,6 +878,36 @@ mod tests {
     }
 
     #[test]
+    fn summarize_api_retry_event() {
+        let event = json!({
+            "type": "system",
+            "subtype": "api_retry",
+            "attempt": 2,
+            "max_retries": 5,
+            "retry_delay_ms": 3000,
+            "error": {"message": "Rate limit exceeded"}
+        });
+        assert_eq!(
+            summarize_system_event(&event).as_deref(),
+            Some("[api:retry] Rate limit exceeded (attempt 2/5, retrying in 3s)")
+        );
+    }
+
+    #[test]
+    fn summarize_auth_status_event_uses_error_first() {
+        let event = json!({
+            "type": "auth_status",
+            "isAuthenticating": false,
+            "output": ["Checking credentials"],
+            "error": "Authentication failed"
+        });
+        assert_eq!(
+            summarize_auth_status_event(&event).as_deref(),
+            Some("[auth:error] Authentication failed")
+        );
+    }
+
+    #[test]
     fn summarize_tool_progress_event_with_task_id() {
         let event = json!({
             "type": "tool_progress",
@@ -740,5 +931,40 @@ mod tests {
             summarize_tool_use_summary_event(&event).as_deref(),
             Some("Read 3 files, ran 2 commands")
         );
+    }
+
+    #[tokio::test]
+    async fn stream_returns_when_result_event_is_seen() {
+        let dir = TempDir::new().unwrap();
+        let command = "printf '%s\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}'; sleep 5";
+        let mut process = AgentProcess::launch(command, dir.path(), &[], false)
+            .await
+            .unwrap();
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (_cancel_tx, mut cancel_rx) = watch::channel(false);
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            stream_claude_session(
+                &mut process,
+                &event_tx,
+                Duration::from_secs(30),
+                &mut cancel_rx,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert!(matches!(result, TurnResult::Completed));
+        let _ = process.kill().await;
+
+        let mut saw_completed = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if matches!(event, AgentEvent::TurnCompleted { .. }) {
+                saw_completed = true;
+            }
+        }
+        assert!(saw_completed);
     }
 }
