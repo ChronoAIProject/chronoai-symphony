@@ -25,7 +25,7 @@ data:
 
     agent:
       max_concurrent_agents: 5
-      max_turns: 20
+      max_turns: 20 # Symphony-managed outer turns per agent session.
 
     codex:
       command: codex app-server

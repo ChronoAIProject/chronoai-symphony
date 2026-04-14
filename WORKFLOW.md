@@ -83,7 +83,7 @@ hooks:
 agent:
   default: codex                        # Which agent to use by default.
   max_concurrent_agents: 5
-  max_turns: 20
+  max_turns: 20                         # Symphony-managed outer turns per agent session.
   max_retry_backoff_ms: 300000
   auto_merge: false                     # Auto-merge PR after approval (default: false).
   # require_label: symphony             # Only dispatch issues with this label.
@@ -110,7 +110,7 @@ agents:
   #   reasoning_effort: high             # --effort flag. low, medium, high, max.
   #   approval_policy: never             # Trusted isolated runner default.
   #   # allowed_tools / disallowed_tools are optional. Leave them unset for full access.
-  #   max_turns: 20
+  #   max_turns: 20                     # Claude CLI internal --max-turns per invocation.
   #   network_access: true
   #   turn_timeout_ms: 7200000           # 2 hours for full session.
 

@@ -279,7 +279,7 @@ hooks:
 agent:
   default: codex                       # Which agent profile to use by default.
   max_concurrent_agents: 10            # Global concurrency limit. Default: 10.
-  max_turns: 20                        # Max turns per agent session. Must be > 0.
+  max_turns: 20                        # Max Symphony-managed outer turns per agent session. Must be > 0.
   max_retry_backoff_ms: 300000         # Max retry delay. Default: 5 minutes.
   auto_merge: false                    # Auto-merge after approval. Default: false.
   require_label: symphony              # Only dispatch issues with this label.
@@ -305,7 +305,7 @@ agents:
     model: claude-sonnet-4-6           # Passed as --model flag.
     reasoning_effort: high             # Passed as --effort flag. low/medium/high/max.
     approval_policy: never             # Trusted isolated runner default.
-    max_turns: 20                      # Passed as --max-turns flag.
+    max_turns: 20                      # Claude CLI internal --max-turns per invocation. Default: 20.
     # allowed_tools / disallowed_tools are optional. Leave them unset for full access.
     network_access: true
     turn_timeout_ms: 7200000           # 2 hours for full Claude session.
@@ -646,7 +646,7 @@ Options:
 3. **Workspace**: Each issue gets a directory under `workspace.root` with its own git clone plus local coordination files under `.symphony/coordination/`.
 4. **Branching**: The `before_run` hook creates a feature branch (`symphony/issue-N`) from `main` for each issue, so agents never conflict on the same branch.
 5. **Agent**: A Codex app-server subprocess is launched in the workspace. Symphony sends the rendered prompt (including the full issue description) and streams turn events in real-time.
-6. **Turns**: The agent can run up to `max_turns` consecutive turns per session. Between turns, Symphony checks if the issue is still active.
+6. **Turns**: The agent can run up to `agent.max_turns` consecutive Symphony-managed turns per session. Between turns, Symphony checks if the issue is still active. For Claude, `agents.claude.max_turns` separately controls the Claude CLI internal `--max-turns` guard for each invocation.
 7. **Dashboard**: The web UI shows running sessions with live activity feed, token usage, pending approvals with approve/deny buttons, and retry queue status.
 8. **Retry**: On failure, exponential backoff retries are scheduled. On normal exit, a 1-second continuation retry re-checks issue state.
 9. **Reconciliation**: Every tick, running issues are checked against GitHub. Terminal issues trigger workspace cleanup. Non-active issues stop the agent.
@@ -659,7 +659,7 @@ Symphony supports two integration modes:
 | Agent | Type | Command | Install | Notes |
 |-------|------|---------|---------|-------|
 | [OpenAI Codex](https://github.com/openai/codex) | `codex` (default) | `codex app-server` | `npm i -g @openai/codex` | JSON-RPC protocol over stdio. Multi-turn sessions managed by Symphony. |
-| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `claude-cli` | `claude` | [Install guide](https://docs.anthropic.com/en/docs/claude-code/getting-started) | Native CLI integration. Uses `claude -p` with `--output-format stream-json`, `--verbose`, and hook event streaming. Single invocation, Claude manages its own turns. |
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `claude-cli` | `claude` | [Install guide](https://docs.anthropic.com/en/docs/claude-code/getting-started) | Native CLI integration. Uses `claude -p` with `--output-format stream-json`, `--verbose`, and hook event streaming. Symphony manages outer turns and resumes the same Claude session between invocations. |
 
 ### Multi-agent setup
 
@@ -678,7 +678,7 @@ agents:
     model: claude-sonnet-4-6
     reasoning_effort: high             # Claude: --effort high (low/medium/high/max)
     approval_policy: never
-    max_turns: 20
+    max_turns: 20                      # Claude CLI internal --max-turns per invocation
 
 agent:
   default: codex    # Issues without a label use Codex
@@ -885,8 +885,8 @@ graph TB
 | | Codex (`codex`) | Claude Code (`claude-cli`) |
 |---|---|---|
 | Protocol | JSON-RPC over stdio | `claude -p` with stream-json output |
-| Handshake | initialize -> thread/start -> turn/start | None (single CLI invocation) |
-| Turn management | Symphony manages multi-turn loop | Claude CLI manages internally via `--max-turns` |
+| Handshake | initialize -> thread/start -> turn/start | None per CLI invocation; Symphony supplies/resumes a stable Claude session ID |
+| Turn management | Symphony manages multi-turn loop via `agent.max_turns` | Symphony manages outer turns via `agent.max_turns`; Claude CLI manages its internal tool/model loop within each invocation via `agents.claude.max_turns` |
 | Approval policy | Sent in JSON-RPC handshake params | `never` → `--dangerously-skip-permissions` |
 | Coordination surface | Native Symphony dynamic tools when available | Same Symphony backend via workspace helpers today |
 | Tool filters | Access is managed by Codex sandbox/approval policy | `allowed_tools` / `disallowed_tools` map to Claude CLI flags when you choose to restrict it |

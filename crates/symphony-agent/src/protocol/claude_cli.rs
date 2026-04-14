@@ -1,9 +1,8 @@
 //! Native Claude Code CLI adapter.
 //!
 //! Parses streaming JSON output from `claude -p --output-format stream-json`.
-//! Unlike the Codex JSON-RPC protocol, there is no handshake or multi-turn
-//! loop -- the CLI runs a single invocation and streams structured events
-//! to stdout.
+//! Unlike the Codex JSON-RPC protocol, there is no handshake. This adapter
+//! streams one Claude CLI invocation; the orchestrator owns the outer turn loop.
 
 use std::time::Duration;
 
@@ -255,6 +254,10 @@ fn result_is_error(parsed: &Value) -> bool {
         .unwrap_or_else(|| result_subtype(parsed).is_some_and(|subtype| subtype != "success"))
 }
 
+fn result_is_max_turns(parsed: &Value) -> bool {
+    result_subtype(parsed) == Some("error_max_turns")
+}
+
 fn result_error_message(parsed: &Value) -> String {
     let errors: Vec<&str> = parsed
         .get("errors")
@@ -480,7 +483,21 @@ async fn stream_claude_inner(
                     );
                 }
 
-                if is_error {
+                if is_error && result_is_max_turns(&parsed) {
+                    let error_msg = result_error_message(&parsed);
+                    emit_notification(
+                        event_tx,
+                        format!("{error_msg}; continuing if Symphony turns remain"),
+                    )
+                    .await;
+                    let _ = event_tx
+                        .send(AgentEvent::TurnCompleted {
+                            timestamp: Utc::now(),
+                            usage: extract_claude_usage(&parsed).map(|u| u.to_token_usage()),
+                        })
+                        .await;
+                    final_result = TurnResult::Completed;
+                } else if is_error {
                     let error_msg = result_error_message(&parsed);
                     let _ = event_tx
                         .send(AgentEvent::TurnFailed {
@@ -761,6 +778,7 @@ mod tests {
             result_error_message(&event),
             "error_max_turns: Reached maximum number of turns (20)"
         );
+        assert!(result_is_max_turns(&event));
     }
 
     #[test]

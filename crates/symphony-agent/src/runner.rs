@@ -6,6 +6,7 @@
 //! between turns.
 
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
 use serde_json::{Value, json};
@@ -69,6 +70,43 @@ fn shell_escape_arg(value: &str) -> String {
     }
 
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn generate_uuid_like_session_id() -> String {
+    let mut bytes = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .to_be_bytes();
+
+    let pid = std::process::id().to_be_bytes();
+    for (idx, byte) in pid.iter().enumerate() {
+        bytes[12 + idx] ^= byte;
+    }
+
+    // Make the locally generated ID pass UUID v4 validation in Claude Code.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
+    )
 }
 
 impl AgentRunner {
@@ -367,12 +405,17 @@ impl AgentRunner {
     ///
     /// Constructs `claude -p "$(cat "$SYMPHONY_PROMPT_FILE")" --output-format stream-json`
     /// with Chrono Code-compatible streaming flags and optional filters.
-    fn build_claude_command(&self, max_turns: u32) -> String {
+    fn build_claude_command(&self, cli_max_turns: u32, session_id: &str, resume: bool) -> String {
         let mut cmd = self.profile.command.clone();
         // Read prompt from file to avoid bash expanding $, backticks, etc.
         // in the prompt content. $(cat ...) output is not re-expanded
         // when inside double quotes.
         cmd = format!("{cmd} -p \"$(cat \"$SYMPHONY_PROMPT_FILE\")\"");
+        if resume {
+            cmd = format!("{cmd} --resume {}", shell_escape_arg(session_id));
+        } else {
+            cmd = format!("{cmd} --session-id {}", shell_escape_arg(session_id));
+        }
         cmd = format!("{cmd} --output-format=stream-json");
         cmd = format!("{cmd} --include-hook-events");
         // Only skip permissions when approval_policy is "never" (default).
@@ -387,7 +430,7 @@ impl AgentRunner {
         if skip_permissions {
             cmd = format!("{cmd} --dangerously-skip-permissions");
         }
-        cmd = format!("{cmd} --max-turns {max_turns}");
+        cmd = format!("{cmd} --max-turns {cli_max_turns}");
         cmd = format!("{cmd} --verbose");
         if !self.profile.allowed_tools.is_empty() {
             let tools = shell_escape_arg(&self.profile.allowed_tools.join(","));
@@ -410,17 +453,25 @@ impl AgentRunner {
     ///
     /// Launches the `claude` CLI subprocess with the prompt written to
     /// `SYMPHONY_PROMPT_FILE` to avoid shell escaping issues. Returns an
-    /// `AgentSession` ready for streaming.
+    /// `AgentSession` ready for streaming. `cli_max_turns` is passed directly
+    /// to Claude's internal `--max-turns` guard for this invocation.
     pub async fn start_claude_session(
         &self,
         workspace_path: &Path,
         issue: &Issue,
         prompt: &str,
-        max_turns: u32,
+        cli_max_turns: u32,
+        resume_session_id: Option<&str>,
+        turn_number: u32,
         extra_env_vars: &[(String, String)],
         event_tx: &mpsc::Sender<AgentEvent>,
     ) -> Result<AgentSession, SymphonyError> {
-        let command = self.build_claude_command(max_turns);
+        let session_id = resume_session_id
+            .map(str::to_owned)
+            .unwrap_or_else(generate_uuid_like_session_id);
+        let is_resume = resume_session_id.is_some();
+        let turn_id = turn_number.to_string();
+        let command = self.build_claude_command(cli_max_turns, &session_id, is_resume);
 
         info!(
             issue_id = %issue.id,
@@ -431,7 +482,7 @@ impl AgentRunner {
 
         // Write prompt to a file to avoid bash expanding $, backticks, etc.
         // The command reads it via $(cat "$SYMPHONY_PROMPT_FILE").
-        let prompt_file = workspace_path.join(".symphony_prompt");
+        let prompt_file = workspace_path.join(format!(".symphony_prompt_{session_id}_{turn_id}"));
         std::fs::write(&prompt_file, prompt).map_err(|e| SymphonyError::ResponseError {
             detail: format!("failed to write prompt file: {e}"),
         })?;
@@ -462,16 +513,9 @@ impl AgentRunner {
             }
         };
 
-        let session_id = format!(
-            "claude-{:x}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-        );
         let session_info = SessionInfo {
             thread_id: session_id.clone(),
-            turn_id: "1".to_string(),
+            turn_id: turn_id.clone(),
             session_id: session_id.clone(),
         };
 
@@ -481,7 +525,7 @@ impl AgentRunner {
             .send(AgentEvent::SessionStarted {
                 session_id: session_id.clone(),
                 thread_id: session_id.clone(),
-                turn_id: "1".to_string(),
+                turn_id,
                 pid,
                 timestamp: Utc::now(),
             })
@@ -495,11 +539,11 @@ impl AgentRunner {
         })
     }
 
-    /// Run the entire Claude CLI session.
+    /// Run one Claude CLI invocation.
     ///
-    /// This is a single blocking call -- Claude CLI manages its own turn
-    /// loop internally. No multi-turn loop, no approval handler, and no
-    /// continuation prompts are needed.
+    /// Claude CLI manages its own model/tool loop inside this invocation.
+    /// The orchestrator manages outer turns by starting a new invocation and
+    /// resuming the same Claude session when continuation is needed.
     pub async fn run_claude_session(
         &self,
         session: &mut AgentSession,
@@ -572,9 +616,12 @@ mod tests {
     fn build_claude_command_includes_streaming_flags_and_tool_filters() {
         let runner = AgentRunner::new(claude_profile());
 
-        let command = runner.build_claude_command(12);
+        let command =
+            runner.build_claude_command(12, "550e8400-e29b-41d4-a716-446655440000", false);
 
         assert!(command.contains("-p \"$(cat \"$SYMPHONY_PROMPT_FILE\")\""));
+        assert!(command.contains("--session-id 550e8400-e29b-41d4-a716-446655440000"));
+        assert!(!command.contains("--resume"));
         assert!(command.contains("--output-format=stream-json"));
         assert!(command.contains("--include-hook-events"));
         assert!(command.contains("--dangerously-skip-permissions"));
@@ -594,11 +641,35 @@ mod tests {
         profile.disallowed_tools.clear();
 
         let runner = AgentRunner::new(profile);
-        let command = runner.build_claude_command(3);
+        let command = runner.build_claude_command(3, "550e8400-e29b-41d4-a716-446655440000", false);
 
         assert!(!command.contains("--dangerously-skip-permissions"));
         assert!(!command.contains("--allowed-tools"));
         assert!(!command.contains("--disallowed-tools"));
+    }
+
+    #[test]
+    fn build_claude_command_can_resume_existing_session() {
+        let runner = AgentRunner::new(claude_profile());
+
+        let command = runner.build_claude_command(12, "550e8400-e29b-41d4-a716-446655440000", true);
+
+        assert!(command.contains("--resume 550e8400-e29b-41d4-a716-446655440000"));
+        assert!(!command.contains("--session-id"));
+    }
+
+    #[test]
+    fn generated_claude_session_id_is_uuid_like() {
+        let session_id = generate_uuid_like_session_id();
+        let bytes = session_id.as_bytes();
+
+        assert_eq!(session_id.len(), 36);
+        assert_eq!(bytes[8], b'-');
+        assert_eq!(bytes[13], b'-');
+        assert_eq!(bytes[18], b'-');
+        assert_eq!(bytes[23], b'-');
+        assert_eq!(bytes[14], b'4');
+        assert!(matches!(bytes[19], b'8' | b'9' | b'a' | b'b'));
     }
 
     #[test]

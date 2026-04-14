@@ -83,7 +83,7 @@ hooks:
 agent:
   default: codex
   max_concurrent_agents: 5
-  max_turns: 20
+  max_turns: 20                         # Symphony-managed outer turns per agent session.
   max_retry_backoff_ms: 300000
   auto_merge: false
 
@@ -101,7 +101,7 @@ agents:
     agent_type: claude-cli
     command: claude
     approval_policy: never
-    max_turns: 20
+    max_turns: 20                       # Claude CLI internal --max-turns per invocation.
     network_access: true
     turn_timeout_ms: 7200000
 

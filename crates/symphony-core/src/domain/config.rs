@@ -21,9 +21,9 @@ pub struct HooksConfig {
 
 /// The type of agent backend to use for a profile.
 ///
-/// Determines the communication protocol: Codex uses JSON-RPC with
-/// handshake and multi-turn loop; Claude CLI uses a single subprocess
-/// invocation with streaming JSON output.
+/// Determines the communication protocol: Codex uses JSON-RPC with a
+/// handshake; Claude CLI uses streaming JSON output and resumes between
+/// Symphony-managed outer turns.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentType {
@@ -64,6 +64,9 @@ pub struct AgentProfileConfig {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub network_access: bool,
+    /// Integration-specific turn limit. For Claude CLI, this is the internal
+    /// `--max-turns` guard per invocation; `agent.max_turns` still controls
+    /// the Symphony-managed outer loop.
     pub max_turns: Option<u32>,
     /// Claude Code-only tool allowlist passed via `--allowed-tools`.
     pub allowed_tools: Vec<String>,

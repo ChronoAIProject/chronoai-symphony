@@ -32,6 +32,9 @@ pub use symphony_agent::runner::AgentRunner as AgentRunnerType;
 const DEFAULT_CONTINUATION_PROMPT: &str =
     "Continue working on the issue. Review your previous changes and verify correctness.";
 
+/// Default Claude CLI internal max-turns guard per Symphony-managed invocation.
+const DEFAULT_CLAUDE_CLI_MAX_TURNS: u32 = 20;
+
 /// Result returned by a worker task.
 #[derive(Debug)]
 pub struct WorkerResult {
@@ -249,18 +252,21 @@ pub async fn run_worker(
     // Branch on agent type.
     let exit_reason = match agent_type {
         AgentType::ClaudeCli => {
-            let effective_max_turns = profile_max_turns.unwrap_or(max_turns);
+            let claude_cli_max_turns = profile_max_turns.unwrap_or(DEFAULT_CLAUDE_CLI_MAX_TURNS);
             run_claude_worker(
                 &agent_runner,
                 &issue,
                 &issue_id,
                 &identifier,
                 &rendered_prompt,
-                effective_max_turns,
+                max_turns,
+                claude_cli_max_turns,
                 &workspace_path,
                 &session_env_vars,
                 &local_tx,
                 &mut cancel_rx,
+                &config,
+                &tracker,
             )
             .await
         }
@@ -1257,85 +1263,215 @@ async fn ensure_git_exclude_entries(workspace_path: &Path) -> Result<(), std::io
     Ok(())
 }
 
-/// Run a Claude CLI worker session.
+async fn should_continue_after_turn(
+    issue_id: &str,
+    tracker: &Arc<dyn IssueTracker>,
+    config: &ServiceConfig,
+) -> bool {
+    match tracker
+        .fetch_issue_states_by_ids(&[issue_id.to_string()])
+        .await
+    {
+        Ok(issues) => {
+            if let Some(updated) = issues.first() {
+                let normalized = normalize_state(&updated.state);
+                let is_terminal = config
+                    .tracker_terminal_states
+                    .iter()
+                    .any(|t| normalize_state(t) == normalized);
+
+                if is_terminal {
+                    info!(
+                        issue_id = %issue_id,
+                        state = %updated.state,
+                        "issue reached terminal state, stopping"
+                    );
+                    return false;
+                }
+
+                let is_handoff = if config.pipeline_stages.is_empty() {
+                    // Legacy hardcoded list.
+                    let handoff_states = [
+                        "human review",
+                        "human-review",
+                        "humanreview",
+                        "code review",
+                        "code-review",
+                        "codereview",
+                        "merging",
+                        "blocked",
+                    ];
+                    handoff_states
+                        .iter()
+                        .any(|h| normalize_state(h) == normalized)
+                } else {
+                    config.is_no_agent_state_by_name(&updated.state)
+                };
+
+                if is_handoff {
+                    info!(
+                        issue_id = %issue_id,
+                        state = %updated.state,
+                        "issue moved to handoff state, stopping worker"
+                    );
+                    return false;
+                }
+
+                true
+            } else {
+                warn!(issue_id = %issue_id, "issue not found in tracker, stopping");
+                false
+            }
+        }
+        Err(e) => {
+            warn!(
+                issue_id = %issue_id,
+                error = %e,
+                "failed to check issue state, continuing"
+            );
+            true
+        }
+    }
+}
+
+/// Run Claude CLI as Symphony-managed outer turns.
 ///
-/// Single subprocess invocation -- Claude manages its own turn loop.
-/// No approval handler, no between-turn issue state checks.
+/// Each outer turn is one Claude CLI invocation. Claude still manages its own
+/// model/tool loop within that invocation, but Symphony checks tracker state
+/// between invocations and resumes the same Claude session for continuation.
 async fn run_claude_worker(
     agent_runner: &AgentRunner,
     issue: &Issue,
     issue_id: &str,
     _identifier: &str,
     prompt: &str,
-    max_turns: u32,
+    outer_max_turns: u32,
+    claude_cli_max_turns: u32,
     workspace_path: &std::path::Path,
     session_env_vars: &[(String, String)],
     event_tx: &mpsc::Sender<AgentEvent>,
     cancel_rx: &mut tokio::sync::watch::Receiver<bool>,
+    config: &ServiceConfig,
+    tracker: &Arc<dyn IssueTracker>,
 ) -> WorkerExitReason {
-    if *cancel_rx.borrow() {
-        info!(issue_id = %issue_id, "worker cancelled before start");
-        return WorkerExitReason::Abnormal("cancelled by orchestrator".to_string());
+    let mut claude_session_id: Option<String> = None;
+    let mut turn_count = 0u32;
+    let mut exit_reason = WorkerExitReason::Normal;
+
+    for turn_num in 0..outer_max_turns {
+        if *cancel_rx.borrow() {
+            info!(issue_id = %issue_id, "worker cancelled by orchestrator");
+            exit_reason = WorkerExitReason::Abnormal("cancelled by orchestrator".to_string());
+            break;
+        }
+
+        let is_first_turn = turn_num == 0;
+        let turn_prompt = if is_first_turn {
+            prompt.to_string()
+        } else {
+            DEFAULT_CONTINUATION_PROMPT.to_string()
+        };
+
+        info!(
+            issue_id = %issue_id,
+            turn = turn_num + 1,
+            max_turns = outer_max_turns,
+            claude_cli_max_turns,
+            "starting Claude turn"
+        );
+
+        let mut session = match agent_runner
+            .start_claude_session(
+                workspace_path,
+                issue,
+                &turn_prompt,
+                claude_cli_max_turns,
+                claude_session_id.as_deref(),
+                turn_num + 1,
+                session_env_vars,
+                event_tx,
+            )
+            .await
+        {
+            Ok(session) => session,
+            Err(e) => {
+                error!(issue_id = %issue_id, error = %e, "failed to start Claude session");
+                exit_reason =
+                    WorkerExitReason::Abnormal(format!("claude session start failed: {e}"));
+                break;
+            }
+        };
+
+        if claude_session_id.is_none() {
+            claude_session_id = Some(session.session_info.session_id.clone());
+        }
+
+        let turn_result = match agent_runner
+            .run_claude_session(&mut session, event_tx, cancel_rx)
+            .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                error!(issue_id = %issue_id, error = %e, "Claude session error");
+                let _ = agent_runner.stop_session(&mut session).await;
+                exit_reason = WorkerExitReason::Abnormal(format!("claude session error: {e}"));
+                break;
+            }
+        };
+
+        if let Err(e) = agent_runner.stop_session(&mut session).await {
+            warn!(issue_id = %issue_id, error = %e, "failed to stop Claude process cleanly");
+        }
+
+        turn_count += 1;
+
+        match turn_result {
+            TurnResult::Completed => {
+                info!(issue_id = %issue_id, turn = turn_count, "Claude turn completed");
+            }
+            TurnResult::Failed(ref error) => {
+                warn!(issue_id = %issue_id, error = %error, "Claude turn failed");
+                exit_reason = WorkerExitReason::Abnormal(format!("claude turn failed: {error}"));
+                break;
+            }
+            TurnResult::Cancelled => {
+                info!(issue_id = %issue_id, "Claude turn cancelled");
+                exit_reason = WorkerExitReason::Abnormal("claude turn cancelled".to_string());
+                break;
+            }
+            TurnResult::TimedOut => {
+                warn!(issue_id = %issue_id, "Claude turn timed out");
+                exit_reason = WorkerExitReason::Abnormal("claude turn timed out".to_string());
+                break;
+            }
+            TurnResult::ProcessExited => {
+                warn!(issue_id = %issue_id, "Claude process exited");
+                exit_reason =
+                    WorkerExitReason::Abnormal("claude process exited unexpectedly".to_string());
+                break;
+            }
+            TurnResult::InputRequired => {
+                warn!(issue_id = %issue_id, "Claude requires user input");
+                exit_reason = WorkerExitReason::Abnormal("claude requires user input".to_string());
+                break;
+            }
+        }
+
+        if turn_num + 1 < outer_max_turns
+            && !should_continue_after_turn(issue_id, tracker, config).await
+        {
+            break;
+        }
     }
 
-    let mut session = match agent_runner
-        .start_claude_session(
-            workspace_path,
-            issue,
-            prompt,
-            max_turns,
-            session_env_vars,
-            event_tx,
-        )
-        .await
-    {
-        Ok(s) => s,
-        Err(e) => {
-            error!(issue_id = %issue_id, error = %e, "failed to start Claude session");
-            return WorkerExitReason::Abnormal(format!("claude session start failed: {e}"));
-        }
-    };
+    info!(
+        issue_id = %issue_id,
+        turns = turn_count,
+        exit_reason = ?exit_reason,
+        "Claude worker finished"
+    );
 
-    let turn_result = match agent_runner
-        .run_claude_session(&mut session, event_tx, cancel_rx)
-        .await
-    {
-        Ok(result) => result,
-        Err(e) => {
-            error!(issue_id = %issue_id, error = %e, "Claude session error");
-            let _ = agent_runner.stop_session(&mut session).await;
-            return WorkerExitReason::Abnormal(format!("claude session error: {e}"));
-        }
-    };
-
-    let _ = agent_runner.stop_session(&mut session).await;
-
-    match turn_result {
-        TurnResult::Completed => {
-            info!(issue_id = %issue_id, "Claude session completed");
-            WorkerExitReason::Normal
-        }
-        TurnResult::Failed(error) => {
-            warn!(issue_id = %issue_id, error = %error, "Claude session failed");
-            WorkerExitReason::Abnormal(format!("claude session failed: {error}"))
-        }
-        TurnResult::Cancelled => {
-            info!(issue_id = %issue_id, "Claude session cancelled");
-            WorkerExitReason::Abnormal("claude session cancelled".to_string())
-        }
-        TurnResult::TimedOut => {
-            warn!(issue_id = %issue_id, "Claude session timed out");
-            WorkerExitReason::Abnormal("claude session timed out".to_string())
-        }
-        TurnResult::ProcessExited => {
-            warn!(issue_id = %issue_id, "Claude process exited");
-            WorkerExitReason::Abnormal("claude process exited unexpectedly".to_string())
-        }
-        other => {
-            warn!(issue_id = %issue_id, result = ?other, "Claude session ended");
-            WorkerExitReason::Normal
-        }
-    }
+    exit_reason
 }
 
 /// Run a Codex worker session with multi-turn loop.
@@ -1459,72 +1595,9 @@ async fn run_codex_worker(
             }
         }
 
-        // Check issue state via tracker before next turn.
-        if turn_num + 1 < max_turns {
-            match tracker
-                .fetch_issue_states_by_ids(&[issue_id.to_string()])
-                .await
-            {
-                Ok(issues) => {
-                    if let Some(updated) = issues.first() {
-                        let normalized = normalize_state(&updated.state);
-                        let is_terminal = config
-                            .tracker_terminal_states
-                            .iter()
-                            .any(|t| normalize_state(t) == normalized);
-
-                        if is_terminal {
-                            info!(
-                                issue_id = %issue_id,
-                                state = %updated.state,
-                                "issue reached terminal state, stopping"
-                            );
-                            break;
-                        }
-
-                        let is_handoff = if config.pipeline_stages.is_empty() {
-                            // Legacy hardcoded list.
-                            let handoff_states = [
-                                "human review",
-                                "human-review",
-                                "humanreview",
-                                "code review",
-                                "code-review",
-                                "codereview",
-                                "merging",
-                                "blocked",
-                            ];
-                            handoff_states
-                                .iter()
-                                .any(|h| normalize_state(h) == normalized)
-                        } else {
-                            config.is_no_agent_state_by_name(&updated.state)
-                        };
-
-                        if is_handoff {
-                            info!(
-                                issue_id = %issue_id,
-                                state = %updated.state,
-                                "issue moved to handoff state, stopping worker"
-                            );
-                            break;
-                        }
-                    } else {
-                        warn!(
-                            issue_id = %issue_id,
-                            "issue not found in tracker, stopping"
-                        );
-                        break;
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        issue_id = %issue_id,
-                        error = %e,
-                        "failed to check issue state, continuing"
-                    );
-                }
-            }
+        if turn_num + 1 < max_turns && !should_continue_after_turn(issue_id, tracker, config).await
+        {
+            break;
         }
     }
 
