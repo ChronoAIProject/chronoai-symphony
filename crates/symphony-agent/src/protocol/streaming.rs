@@ -24,6 +24,7 @@ use crate::protocol::events::{AgentEvent, TokenUsage};
 #[derive(Debug, Clone)]
 pub enum TurnResult {
     Completed,
+    MaxTurns,
     Failed(String),
     Cancelled,
     TimedOut,

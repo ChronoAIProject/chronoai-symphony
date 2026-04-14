@@ -659,7 +659,7 @@ Symphony supports two integration modes:
 | Agent | Type | Command | Install | Notes |
 |-------|------|---------|---------|-------|
 | [OpenAI Codex](https://github.com/openai/codex) | `codex` (default) | `codex app-server` | `npm i -g @openai/codex` | JSON-RPC protocol over stdio. Multi-turn sessions managed by Symphony. |
-| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `claude-cli` | `claude` | [Install guide](https://docs.anthropic.com/en/docs/claude-code/getting-started) | Native CLI integration. Uses `claude -p` with `--output-format stream-json`, `--verbose`, and hook event streaming. Symphony manages outer turns and resumes the same Claude session between invocations. |
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `claude-cli` | `claude` | [Install guide](https://docs.anthropic.com/en/docs/claude-code/getting-started) | Native CLI integration. Uses `claude -p` with `--output-format stream-json`, `--verbose`, and hook event streaming. Symphony stops on normal Claude success and resumes the same Claude session only when Claude hits the CLI `--max-turns` guard. |
 
 ### Multi-agent setup
 
@@ -886,7 +886,7 @@ graph TB
 |---|---|---|
 | Protocol | JSON-RPC over stdio | `claude -p` with stream-json output |
 | Handshake | initialize -> thread/start -> turn/start | None per CLI invocation; Symphony supplies/resumes a stable Claude session ID |
-| Turn management | Symphony manages multi-turn loop via `agent.max_turns` | Symphony manages outer turns via `agent.max_turns`; Claude CLI manages its internal tool/model loop within each invocation via `agents.claude.max_turns` |
+| Turn management | Symphony manages multi-turn loop via `agent.max_turns` | Symphony stops on normal Claude success; if Claude hits the CLI guard, Symphony resumes the same session up to `agent.max_turns`. Claude's internal per-invocation guard is `agents.claude.max_turns` |
 | Approval policy | Sent in JSON-RPC handshake params | `never` → `--dangerously-skip-permissions` |
 | Coordination surface | Native Symphony dynamic tools when available | Same Symphony backend via workspace helpers today |
 | Tool filters | Access is managed by Codex sandbox/approval policy | `allowed_tools` / `disallowed_tools` map to Claude CLI flags when you choose to restrict it |

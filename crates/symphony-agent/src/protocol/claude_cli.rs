@@ -496,7 +496,7 @@ async fn stream_claude_inner(
                             usage: extract_claude_usage(&parsed).map(|u| u.to_token_usage()),
                         })
                         .await;
-                    final_result = TurnResult::Completed;
+                    final_result = TurnResult::MaxTurns;
                 } else if is_error {
                     let error_msg = result_error_message(&parsed);
                     let _ = event_tx
@@ -975,6 +975,41 @@ mod tests {
         .unwrap();
 
         assert!(matches!(result, TurnResult::Completed));
+        let _ = process.kill().await;
+
+        let mut saw_completed = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if matches!(event, AgentEvent::TurnCompleted { .. }) {
+                saw_completed = true;
+            }
+        }
+        assert!(saw_completed);
+    }
+
+    #[tokio::test]
+    async fn stream_distinguishes_max_turns_from_success() {
+        let dir = TempDir::new().unwrap();
+        let command = "printf '%s\n' '{\"type\":\"result\",\"subtype\":\"error_max_turns\",\"is_error\":true,\"errors\":[\"Reached maximum number of turns (20)\"],\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}'; sleep 5";
+        let mut process = AgentProcess::launch(command, dir.path(), &[], false)
+            .await
+            .unwrap();
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (_cancel_tx, mut cancel_rx) = watch::channel(false);
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            stream_claude_session(
+                &mut process,
+                &event_tx,
+                Duration::from_secs(30),
+                &mut cancel_rx,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert!(matches!(result, TurnResult::MaxTurns));
         let _ = process.kill().await;
 
         let mut saw_completed = false;

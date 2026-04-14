@@ -1337,8 +1337,9 @@ async fn should_continue_after_turn(
 /// Run Claude CLI as Symphony-managed outer turns.
 ///
 /// Each outer turn is one Claude CLI invocation. Claude still manages its own
-/// model/tool loop within that invocation, but Symphony checks tracker state
-/// between invocations and resumes the same Claude session for continuation.
+/// model/tool loop within that invocation. Normal Claude success stops the
+/// worker; hitting Claude's CLI max-turns guard resumes the same Claude
+/// session if Symphony turns remain and the tracker state is still active.
 async fn run_claude_worker(
     agent_runner: &AgentRunner,
     issue: &Issue,
@@ -1428,6 +1429,14 @@ async fn run_claude_worker(
         match turn_result {
             TurnResult::Completed => {
                 info!(issue_id = %issue_id, turn = turn_count, "Claude turn completed");
+                break;
+            }
+            TurnResult::MaxTurns => {
+                info!(
+                    issue_id = %issue_id,
+                    turn = turn_count,
+                    "Claude hit CLI max-turns guard"
+                );
             }
             TurnResult::Failed(ref error) => {
                 warn!(issue_id = %issue_id, error = %error, "Claude turn failed");
@@ -1566,6 +1575,13 @@ async fn run_codex_worker(
         match turn_result {
             TurnResult::Completed => {
                 info!(issue_id = %issue_id, turn = turn_count, "turn completed");
+            }
+            TurnResult::MaxTurns => {
+                warn!(issue_id = %issue_id, "unexpected max-turns result from Codex stream");
+                exit_reason = WorkerExitReason::Abnormal(
+                    "unexpected max-turns result from Codex stream".to_string(),
+                );
+                break;
             }
             TurnResult::Failed(ref error) => {
                 warn!(issue_id = %issue_id, error = %error, "turn failed");

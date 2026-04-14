@@ -22,8 +22,8 @@ pub struct HooksConfig {
 /// The type of agent backend to use for a profile.
 ///
 /// Determines the communication protocol: Codex uses JSON-RPC with a
-/// handshake; Claude CLI uses streaming JSON output and resumes between
-/// Symphony-managed outer turns.
+/// handshake; Claude CLI uses streaming JSON output and resumes the same
+/// session only when its internal max-turns guard is hit.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentType {
